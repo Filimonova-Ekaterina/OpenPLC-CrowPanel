@@ -1,0 +1,50 @@
+menu "OpenPLC HMI"
+
+    config OPCUA_SERVER_ENDPOINT
+        string "OPC UA server endpoint"
+        default "opc.tcp://192.168.1.100:4840/compressed-air-station/"
+        help
+            Endpoint of the equipment server. Equipment names and tags are
+            always discovered at runtime and are never configured here.
+
+    config OPCUA_CONNECTION_TIMEOUT_MS
+        int "Connection timeout (ms)"
+        range 1000 30000
+        default 5000
+
+    config OPCUA_RECONNECT_DELAY_MS
+        int "Reconnect delay (ms)"
+        range 500 60000
+        default 3000
+
+    config OPCUA_SUBSCRIPTION_INTERVAL_MS
+        int "Subscription and sampling interval (ms)"
+        range 100 10000
+        default 250
+
+    config OPCUA_MAX_EQUIPMENT_OBJECTS
+        int "Maximum discovered equipment objects"
+        range 8 256
+        default 64
+
+    config OPCUA_MAX_TAGS
+        int "Maximum discovered variables"
+        range 16 1024
+        default 256
+
+    config OPCUA_MAX_BROWSE_DEPTH
+        int "Maximum Address Space browse depth"
+        range 2 32
+        default 12
+
+    config OPCUA_TASK_STACK_SIZE
+        int "OPC UA task stack size (bytes)"
+        range 8192 65536
+        default 24576
+
+    config OPCUA_TASK_PRIORITY
+        int "OPC UA task priority"
+        range 1 15
+        default 5
+
+endmenu

@@ -1,0 +1,25 @@
+idf_component_register(
+    SRCS
+        "src/ui/wifi_menu.c"
+        "src/ui/password_dialog.c"
+        "src/ui/message_box.c"
+        "src/ui/openplc_settings.c"
+        "src/settings_events.c"
+        "src/settings_config.c"
+        "src/credentials.c"
+        "src/config_portal.c"
+        "src/wifi.c"
+        "src/wifi_ctrl.c"
+        "src/wifi_connectivity.c"
+        "src/uart_handler.c"
+    INCLUDE_DIRS
+        "include"
+        "include/ui"
+    REQUIRES
+        driver
+        nvs_flash
+        esp_wifi
+        esp_http_server
+        sleep_mode
+        esp_driver_uart
+)
