@@ -5,13 +5,12 @@ idf_component_register(
         "bsp_stc8h1kxx.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "priv_include"
-    REQUIRES driver sdmmc
+    REQUIRES driver sdmmc esp_driver_i2s
     PRIV_REQUIRES
         esp_lcd
         usb
         spiffs
         fatfs
         esp_driver_uart
-        esp_driver_i2s
         esp_driver_ledc
 )

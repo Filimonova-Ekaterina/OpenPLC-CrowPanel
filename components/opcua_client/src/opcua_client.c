@@ -15,6 +15,7 @@
 #include "wifi_ctrl.h"
 
 #define OPCUA_WRITE_QUEUE_LENGTH 12
+#define OPCUA_STATUS_LENGTH 128
 
 typedef enum
 {
@@ -47,7 +48,7 @@ struct opcua_client
     volatile bool stop_requested;
     volatile bool reconnect_requested;
     opcua_client_state_t state;
-    char status[128];
+    char status[OPCUA_STATUS_LENGTH];
 };
 
 static const char* TAG = "opcua_client";
@@ -355,8 +356,25 @@ static void set_status(opcua_client_t* context, opcua_client_state_t state, cons
     }
     xSemaphoreTake(context->status_mutex, portMAX_DELAY);
     context->state = state;
-    snprintf(context->status, sizeof(context->status), "%s: %s", opcua_client_state_name(state),
-             details != NULL ? details : "");
+    const char* state_text  = opcua_client_state_name(state);
+    const char* detail_text = details != NULL ? details : "";
+    size_t write_offset     = 0;
+
+    /* Copy bounded fragments manually because an endpoint URL can be longer
+     * than the short status text shown by the UI. */
+    while (*state_text != '\0' && write_offset + 1 < sizeof(context->status)) {
+        context->status[write_offset++] = *state_text++;
+    }
+    if (write_offset + 1 < sizeof(context->status)) {
+        context->status[write_offset++] = ':';
+    }
+    if (write_offset + 1 < sizeof(context->status)) {
+        context->status[write_offset++] = ' ';
+    }
+    while (*detail_text != '\0' && write_offset + 1 < sizeof(context->status)) {
+        context->status[write_offset++] = *detail_text++;
+    }
+    context->status[write_offset] = '\0';
     xSemaphoreGive(context->status_mutex);
 }
 

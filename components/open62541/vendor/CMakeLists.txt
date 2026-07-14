@@ -1432,8 +1432,11 @@ target_link_libraries(open62541 PRIVATE ${open62541_LIBRARIES})
 # Build Selected Targets #
 ##########################
 
-# always include, builds with make doc
-add_subdirectory(doc)
+# Documentation sources are not vendored for the embedded build. They do not
+# participate in generation of the amalgamated OPC UA client library.
+if(EXISTS "${PROJECT_SOURCE_DIR}/doc/CMakeLists.txt")
+    add_subdirectory(doc)
+endif()
 
 if(UA_BUILD_EXAMPLES)
     if(UA_ENABLE_AMALGAMATION)

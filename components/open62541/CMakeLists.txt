@@ -1,5 +1,3 @@
-include(ExternalProject)
-
 # open62541 generates its public amalgamation from the pinned upstream source.
 # Generation is isolated in the ESP-IDF build directory, so the source tree is
 # never modified and an incremental build can reuse the generated files.
@@ -8,12 +6,27 @@ set(OPEN62541_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 set(OPEN62541_SOURCE "${OPEN62541_GENERATED_DIR}/open62541.c")
 set(OPEN62541_HEADER "${OPEN62541_GENERATED_DIR}/open62541.h")
 
+# ESP-IDF executes component CMakeLists.txt once in CMake script mode to collect
+# dependencies. ExternalProject is not scriptable, so the early pass must stop
+# after publishing this component's requirements.
+if(CMAKE_BUILD_EARLY_EXPANSION)
+    idf_component_register(
+        INCLUDE_DIRS "${OPEN62541_GENERATED_DIR}"
+        REQUIRES lwip vfs sock_utils
+    )
+    return()
+endif()
+
+include(ExternalProject)
+file(MAKE_DIRECTORY "${OPEN62541_GENERATED_DIR}")
+
 ExternalProject_Add(open62541_codegen
     SOURCE_DIR "${OPEN62541_VENDOR_DIR}"
     BINARY_DIR "${OPEN62541_GENERATED_DIR}"
     CMAKE_ARGS
         "-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}"
         "-DCMAKE_BUILD_TYPE=MinSizeRel"
+        "-DOPEN62541_VERSION=v1.4.14"
         "-DUA_ARCHITECTURE=posix"
         "-DUA_ENABLE_AMALGAMATION=ON"
         "-DUA_NAMESPACE_ZERO=MINIMAL"
@@ -23,11 +36,17 @@ ExternalProject_Add(open62541_codegen
         "-DUA_ENABLE_DISCOVERY_MULTICAST=OFF"
         "-DUA_ENABLE_ENCRYPTION=OFF"
         "-DUA_ENABLE_PUBSUB=OFF"
+        "-DUA_ENABLE_PUBSUB_INFORMATIONMODEL=OFF"
+        "-DUA_ENABLE_PUBSUB_ENCRYPTION=OFF"
+        "-DUA_ENABLE_PUBSUB_SKS=OFF"
+        "-DUA_ENABLE_PUBSUB_FILE_CONFIG=OFF"
+        "-DUA_ENABLE_PUBSUB_MONITORING=OFF"
+        "-DUA_ENABLE_PUBSUB_BUFMALLOC=OFF"
         "-DUA_ENABLE_HISTORIZING=OFF"
         "-DUA_ENABLE_JSON_ENCODING=OFF"
         "-DUA_ENABLE_XML_ENCODING=OFF"
         "-DUA_ENABLE_STATUSCODE_DESCRIPTIONS=ON"
-        "-DUA_ENABLE_TYPEDESCRIPTION=OFF"
+        "-DUA_ENABLE_TYPEDESCRIPTION=ON"
         "-DUA_LOGLEVEL=300"
         "-DUA_BUILD_EXAMPLES=OFF"
         "-DUA_BUILD_UNIT_TESTS=OFF"
@@ -45,7 +64,7 @@ set_source_files_properties("${OPEN62541_SOURCE}" PROPERTIES GENERATED TRUE)
 idf_component_register(
     SRCS "${OPEN62541_SOURCE}"
     INCLUDE_DIRS "${OPEN62541_GENERATED_DIR}"
-    REQUIRES lwip vfs
+    REQUIRES lwip vfs sock_utils
 )
 
 add_dependencies(${COMPONENT_LIB} open62541_codegen)

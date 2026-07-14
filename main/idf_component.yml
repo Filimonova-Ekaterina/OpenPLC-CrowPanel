@@ -1,3 +1,8 @@
 dependencies:
   idf:
     version: ">=5.5.2"
+  espressif/esp_hosted:
+    version: 2.11.0
+  esp_lcd_touch_gt911: ^1
+  espressif/usb: ^1.0.0
+  espressif/esp_codec_dev: ^1.5.4

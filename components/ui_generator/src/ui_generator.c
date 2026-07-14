@@ -259,7 +259,7 @@ static void rebuild_interface(ui_generator_t* generator)
 static lv_obj_t* create_equipment_page(ui_generator_t* generator, const data_model_equipment_t* equipment)
 {
     char short_title[24];
-    snprintf(short_title, sizeof(short_title), "%s",
+    snprintf(short_title, sizeof(short_title), "%.23s",
              equipment->display_name[0] != '\0' ? equipment->display_name : equipment->browse_name);
     lv_obj_t* page = navigation_add_page(generator->navigation, short_title);
     style_page_as_grid(page);

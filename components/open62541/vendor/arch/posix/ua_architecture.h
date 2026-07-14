@@ -33,6 +33,14 @@
 #include <ifaddrs.h>
 #endif
 
+/* NI_NUMERICHOST is absent in some ESP-IDF lwIP configurations. The socket
+ * compatibility functions themselves are supplied by espressif/sock_utils. */
+#ifdef ESP_PLATFORM
+#ifndef NI_NUMERICHOST
+#define NI_NUMERICHOST 1
+#endif
+#endif
+
 #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
 # include <sys/param.h>
 # if defined(BSD)
