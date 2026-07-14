@@ -1,0 +1,171 @@
+opcua_server:
+  endpoint_url: "opc.tcp://0.0.0.0:4840/compressed-air-station/"
+  server_name: "Compressed Air Station Equipment Simulator"
+  namespace_uri: "urn:openplc:compressed-air-station:simulator"
+
+simulation:
+  update_interval_seconds: 0.1
+  status_log_interval_seconds: 5.0
+
+station:
+  id: "compressed_air_station"
+  browse_name: "CompressedAirStation"
+  display_name: "Compressed Air Station"
+  description: "Automatically discoverable compressed-air station simulation"
+  initial_demand_m3h: 20.0
+  maximum_demand_m3h: 100.0
+  initial_receiver_pressure_bar: 7.5
+  minimum_pressure_bar: 0.0
+  maximum_pressure_bar: 10.0
+  pressure_response_bar_per_m3h_second: 0.00045
+  network_pressure_drop_bar_per_m3h: 0.002
+  network_pressure_response_bar_per_second: 0.5
+  demand_base_fraction: 0.50
+  demand_slow_wave_fraction: 0.38
+  demand_fast_wave_fraction: 0.10
+  demand_slow_period_seconds: 180.0
+  demand_fast_period_seconds: 47.0
+  commands:
+    reset_alarms:
+      browse_name: "ResetAlarms"
+      display_name: "Reset all alarms"
+      description: "Write True to clear all active simulator alarms; resets automatically"
+      initial_value: false
+
+compressor_defaults: &compressor_defaults
+  stopped_temperature_c: 25.0
+  running_temperature_c: 80.0
+  heating_rate_c_per_second: 0.35
+  cooling_rate_c_per_second: 0.20
+  running_current_a: 20.0
+  current_ramp_a_per_second: 6.0
+  rated_flow_m3h: 38.0
+  rated_power_kw: 15.0
+  description: "Automatically dispatched compressor with writable simulation commands"
+  signals: &compressor_signals
+    temperature:
+      browse_name: "Temperature"
+      display_name: "Discharge temperature"
+      description: "Simulated compressor discharge temperature"
+      initial_value: 25.0
+      engineering_unit: "°C"
+      minimum: -40.0
+      maximum: 180.0
+    motor_current:
+      browse_name: "MotorCurrent"
+      display_name: "Motor current"
+      description: "Simulated electric motor current"
+      initial_value: 0.0
+      engineering_unit: "A"
+      minimum: 0.0
+      maximum: 60.0
+    runtime:
+      browse_name: "Runtime"
+      display_name: "Accumulated runtime"
+      description: "Total time during which this compressor has run"
+      initial_value: 0.0
+      engineering_unit: "h"
+      minimum: 0.0
+      maximum: 1000000.0
+    run_status:
+      browse_name: "RunStatus"
+      display_name: "Running"
+      description: "True while the compressor is producing air"
+      initial_value: false
+    alarm_status:
+      browse_name: "AlarmStatus"
+      display_name: "Alarm active"
+      description: "True while this compressor has one or more active alarms"
+      initial_value: false
+  commands: &compressor_commands
+    run_command:
+      browse_name: "runCommand"
+      display_name: "Manual run command"
+      description: "Write True to force this compressor to run; False restores automatic dispatch"
+      initial_value: false
+    sensor_fault_command:
+      browse_name: "SensorFaultCommand"
+      display_name: "Inject sensor fault"
+      description: "Write True to inject invalid temperature and current readings"
+      initial_value: false
+
+compressors:
+  - <<: *compressor_defaults
+    id: "compressor_1"
+    browse_name: "Compressor1"
+    display_name: "Compressor 1"
+    dispatch_start_percent: 0.0
+    signals: *compressor_signals
+    commands: *compressor_commands
+  - <<: *compressor_defaults
+    id: "compressor_2"
+    browse_name: "Compressor2"
+    display_name: "Compressor 2"
+    dispatch_start_percent: 30.0
+    signals: *compressor_signals
+    commands: *compressor_commands
+  - <<: *compressor_defaults
+    id: "compressor_3"
+    browse_name: "Compressor3"
+    display_name: "Compressor 3"
+    dispatch_start_percent: 60.0001
+    signals: *compressor_signals
+    commands: *compressor_commands
+
+receiver:
+  id: "air_receiver"
+  browse_name: "AirReceiver"
+  display_name: "Air Receiver"
+  description: "Compressed-air storage receiver"
+  signals:
+    pressure:
+      browse_name: "Pressure"
+      display_name: "Receiver pressure"
+      description: "Absolute simulated receiver pressure"
+      initial_value: 7.5
+      engineering_unit: "bar"
+      minimum: 0.0
+      maximum: 10.0
+
+dryer:
+  id: "air_dryer"
+  browse_name: "AirDryer"
+  display_name: "Air Dryer"
+  description: "Dryer follows station production status"
+  signals:
+    status:
+      browse_name: "Status"
+      display_name: "Running"
+      description: "True while the air dryer is operating"
+      initial_value: false
+
+air_network:
+  id: "air_network"
+  browse_name: "AirNetwork"
+  display_name: "Air Network"
+  description: "Plant compressed-air distribution network"
+  signals:
+    network_pressure:
+      browse_name: "NetworkPressure"
+      display_name: "Network pressure"
+      description: "Pressure after demand-related distribution losses"
+      initial_value: 7.5
+      engineering_unit: "bar"
+      minimum: 0.0
+      maximum: 10.0
+    air_demand:
+      browse_name: "AirDemand"
+      display_name: "Air demand"
+      description: "Current plant compressed-air consumption"
+      initial_value: 20.0
+      engineering_unit: "m³/h"
+      minimum: 0.0
+      maximum: 100.0
+    total_power:
+      browse_name: "TotalPower"
+      display_name: "Total power"
+      description: "Combined electrical power of running compressors"
+      initial_value: 0.0
+      engineering_unit: "kW"
+      minimum: 0.0
+      maximum: 100.0
