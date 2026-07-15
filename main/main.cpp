@@ -12,6 +12,9 @@
 #include "idle_monitor.h"
 #include "opcua_client.h"
 #include "settings_config.h"
+#include "sleep_mode.h"
+#include "system_settings.h"
+#include "time_sync.h"
 #include "ui_generator.h"
 #include "wifi_ctrl.h"
 
@@ -21,6 +24,19 @@ static data_model_t* s_data_model;
 static opcua_client_t* s_opcua_client;
 static ui_generator_t* s_ui_generator;
 static char s_opcua_endpoint[OPCUA_CLIENT_ENDPOINT_LENGTH];
+
+/** Pause only OPC UA traffic during display sleep; keep Wi-Fi associated. */
+static void handle_sleep_event(void* argument, esp_event_base_t event_base, int32_t event_id, void* event_data)
+{
+    (void)argument;
+    (void)event_base;
+    (void)event_data;
+    if (event_id == SLEEP_EVENT_ENTER) {
+        opcua_client_pause(s_opcua_client);
+    } else if (event_id == SLEEP_EVENT_WAKE) {
+        opcua_client_resume(s_opcua_client);
+    }
+}
 
 /** Initialize NVS without silently erasing user Wi-Fi settings. */
 static esp_err_t initialize_nonvolatile_storage(void)
@@ -32,7 +48,7 @@ static esp_err_t initialize_nonvolatile_storage(void)
     return result;
 }
 
-/** Start the panel and the LVGL service owned by the board support package. */
+/** Start LVGL with the panel backlight kept off until the first frame is ready. */
 static esp_err_t initialize_display(void)
 {
     bsp_display_cfg_t display_configuration = {
@@ -51,7 +67,7 @@ static esp_err_t initialize_display(void)
         ESP_LOGE(TAG, "Display initialization failed");
         return ESP_FAIL;
     }
-    ESP_RETURN_ON_ERROR(bsp_display_backlight_on(), TAG, "Backlight initialization failed");
+    ESP_RETURN_ON_ERROR(bsp_display_backlight_off(), TAG, "Cannot keep backlight off during startup");
     return ESP_OK;
 }
 
@@ -85,6 +101,10 @@ static esp_err_t initialize_hmi_pipeline(void)
         return ESP_ERR_TIMEOUT;
     }
     esp_err_t ui_result = ui_generator_create(lv_scr_act(), s_data_model, s_opcua_client, &s_ui_generator);
+    if (ui_result == ESP_OK) {
+        /* Render synchronously before sleep_init restores the saved brightness. */
+        lv_refr_now(NULL);
+    }
     bsp_display_unlock();
     ESP_RETURN_ON_ERROR(ui_result, TAG, "Cannot create generated UI");
 
@@ -113,8 +133,15 @@ extern "C" void app_main(void)
 
     /* Existing settings component owns Wi-Fi credentials, scanning, and reconnect. */
     wifi_ctrl_init();
-    ESP_ERROR_CHECK(idle_monitor_init());
-
+    ESP_ERROR_CHECK(time_sync_init());
     ESP_ERROR_CHECK(initialize_hmi_pipeline());
+    ESP_ERROR_CHECK(idle_monitor_init());
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(SLEEP_EVENT, ESP_EVENT_ANY_ID,
+                                                        handle_sleep_event, NULL, NULL));
+    esp_err_t system_settings_result = system_settings_restore_async();
+    if (system_settings_result != ESP_OK) {
+        ESP_LOGW(TAG, "Saved system settings restore could not be scheduled: %s",
+                 esp_err_to_name(system_settings_result));
+    }
     ESP_LOGI(TAG, "HMI initialized; OPC UA endpoint: %s", s_opcua_endpoint);
 }

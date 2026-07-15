@@ -13,7 +13,8 @@
 #include "config_portal.h"
 
 #define WIFI_MAX_NETWORKS 32
-#define WIFI_MAX_SSID_LEN 32
+#define WIFI_SSID_BUFFER_LENGTH 33
+#define WIFI_RECONNECT_DELAY_MS 2000
 
 typedef struct
 {
@@ -26,13 +27,13 @@ typedef struct
     uint32_t last_scan_time;
     uint32_t scan_cooldown_ms;
 
-    char network_ssid[WIFI_MAX_SSID_LEN];
+    char network_ssid[WIFI_SSID_BUFFER_LENGTH];
     char network_password[64];
 
     bool pending_connect;
     bool pending_connect_from_uart_credentials;
     bool uart_password_ready;
-    char uart_network_ssid[WIFI_MAX_SSID_LEN];
+    char uart_network_ssid[WIFI_SSID_BUFFER_LENGTH];
     char uart_network_password[64];
 
     SemaphoreHandle_t mutex;
@@ -40,8 +41,11 @@ typedef struct
     uint32_t scan_interval_ms;
     bool auto_start_wifi;
     bool auto_connect_from_saved;
+    bool reconnect_suppressed;
+    bool ip_lost;
     
     TimerHandle_t save_timer;
+    TimerHandle_t reconnect_timer;
     uint32_t last_save_hash;
 } wifi_mgr_t;
 
@@ -52,6 +56,7 @@ static void scanner_task(void* pv);
 static void connect_to_network(const char* ssid, const char* password);
 static bool set_scanning(bool scanning);
 static void save_state_timer_cb(TimerHandle_t xTimer);
+static void reconnect_timer_cb(TimerHandle_t xTimer);
 static uint32_t calculate_state_hash(void);
 
 static size_t safe_strcpy(char *dest, const char *src, size_t dest_size)
@@ -110,6 +115,41 @@ static void save_state_timer_cb(TimerHandle_t xTimer)
     
     s_mgr.pending_save = false;
     xSemaphoreGiveRecursive(s_mgr.mutex);
+}
+
+/* Reconnect outside the event callback. A short delay also gives DHCP a
+ * chance to recover on its own after a transient LOST_IP notification. */
+static void reconnect_timer_cb(TimerHandle_t xTimer)
+{
+    xSemaphoreTakeRecursive(s_mgr.mutex, portMAX_DELAY);
+
+    bool recovery_allowed = s_mgr.initialized && s_mgr.interface_started &&
+                            !s_mgr.reconnect_suppressed &&
+                            !config_portal_is_running();
+    bool force_reassociate = recovery_allowed && s_mgr.connected && s_mgr.ip_lost;
+    bool reconnect_station = recovery_allowed && !s_mgr.connected &&
+                             s_mgr.network_ssid[0] != '\0';
+
+    if (force_reassociate) {
+        s_mgr.ip_lost = false;
+    }
+    xSemaphoreGiveRecursive(s_mgr.mutex);
+
+    esp_err_t result = ESP_OK;
+    if (force_reassociate) {
+        ESP_LOGW(TAG, "IP was not restored; reassociating WiFi station");
+        result = esp_wifi_disconnect();
+    } else if (reconnect_station) {
+        ESP_LOGI(TAG, "Reconnecting to saved WiFi network");
+        result = esp_wifi_connect();
+    } else {
+        return;
+    }
+
+    if (result != ESP_OK) {
+        ESP_LOGW(TAG, "WiFi recovery request failed: %s", esp_err_to_name(result));
+        xTimerStart(s_mgr.reconnect_timer, 0);
+    }
 }
 
 void wifi_ctrl_schedule_state_save(void)
@@ -197,6 +237,7 @@ static void on_wifi_event(void* arg, esp_event_base_t event_base, int32_t event_
     case WIFI_EVENT_STA_START:
         ESP_LOGI(TAG, "STA started");
         s_mgr.interface_started = true;
+        s_mgr.reconnect_suppressed = false;
         
         if (s_mgr.auto_connect_from_saved && strlen(s_mgr.network_ssid) > 0 && strlen(s_mgr.network_password) > 0) {
             ESP_LOGI(TAG, "Auto-connecting to: %s", s_mgr.network_ssid);
@@ -212,8 +253,12 @@ static void on_wifi_event(void* arg, esp_event_base_t event_base, int32_t event_
         break;
     case WIFI_EVENT_STA_STOP:
         ESP_LOGI(TAG, "STA stopped");
+        if (s_mgr.reconnect_timer) {
+            xTimerStop(s_mgr.reconnect_timer, 0);
+        }
         s_mgr.interface_started                     = false;
         s_mgr.connected                             = false;
+        s_mgr.ip_lost                               = false;
         s_mgr.pending_connect_from_uart_credentials = false;
         s_mgr.network_ssid[0]                       = '\0';
         s_mgr.network_password[0]                   = '\0';
@@ -224,6 +269,10 @@ static void on_wifi_event(void* arg, esp_event_base_t event_base, int32_t event_
         break;
     case WIFI_EVENT_STA_CONNECTED: {
         s_mgr.connected = true;
+        s_mgr.ip_lost = false;
+        if (s_mgr.reconnect_timer) {
+            xTimerStop(s_mgr.reconnect_timer, 0);
+        }
         wifi_event_sta_connected_t* event = (wifi_event_sta_connected_t*)event_data;
         ESP_LOGI(TAG, "Connected to AP: %s", event->ssid);
         
@@ -276,6 +325,7 @@ static void on_wifi_event(void* arg, esp_event_base_t event_base, int32_t event_
         bool was_pending_from_uart = s_mgr.pending_connect_from_uart_credentials;
         
         s_mgr.connected                             = false;
+        s_mgr.ip_lost                               = false;
         s_mgr.pending_connect_from_uart_credentials = false;
         
         ESP_LOGI(TAG, "Disconnected from AP: %s, reason: %d", target_ssid, event->reason);
@@ -305,13 +355,26 @@ static void on_wifi_event(void* arg, esp_event_base_t event_base, int32_t event_
             }
         }
         
+        bool should_reconnect = s_mgr.interface_started &&
+                                !s_mgr.reconnect_suppressed &&
+                                !config_portal_is_running() &&
+                                target_ssid[0] != '\0';
+
         s_mgr.pending_connect = false;
-        s_mgr.network_ssid[0]     = '\0';
-        s_mgr.network_password[0] = '\0';
+        if (should_reconnect) {
+            safe_strcpy(s_mgr.network_ssid, target_ssid, sizeof(s_mgr.network_ssid));
+        } else {
+            s_mgr.network_ssid[0]     = '\0';
+            s_mgr.network_password[0] = '\0';
+        }
         credentials_clear_pending_ssid();
 
         wifi_connectivity_stop();
         xSemaphoreGiveRecursive(s_mgr.mutex);
+        if (should_reconnect && s_mgr.reconnect_timer) {
+            ESP_LOGI(TAG, "WiFi reconnect scheduled in %d ms", WIFI_RECONNECT_DELAY_MS);
+            xTimerStart(s_mgr.reconnect_timer, 0);
+        }
         wifi_ctrl_schedule_state_save();
         break;
     }
@@ -337,6 +400,10 @@ static void on_ip_event(void* arg, esp_event_base_t event_base, int32_t event_id
     switch (event_id) {
     case IP_EVENT_STA_GOT_IP: {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*)event_data;
+        s_mgr.ip_lost = false;
+        if (s_mgr.reconnect_timer) {
+            xTimerStop(s_mgr.reconnect_timer, 0);
+        }
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
         xSemaphoreGiveRecursive(s_mgr.mutex);
         xTaskCreate(connectivity_check_async, "connectivity_check_async", 4096, NULL, 2, NULL);
@@ -344,7 +411,11 @@ static void on_ip_event(void* arg, esp_event_base_t event_base, int32_t event_id
     }
     case IP_EVENT_STA_LOST_IP:
         ESP_LOGW(TAG, "Lost IP address");
+        s_mgr.ip_lost = true;
         xSemaphoreGiveRecursive(s_mgr.mutex);
+        if (s_mgr.reconnect_timer && !s_mgr.reconnect_suppressed) {
+            xTimerStart(s_mgr.reconnect_timer, 0);
+        }
         break;
     default:
         xSemaphoreGiveRecursive(s_mgr.mutex);
@@ -360,10 +431,15 @@ static void on_ui_request(void* arg, esp_event_base_t event_base, int32_t event_
         if (event_data) {
             bool enabled = *(bool*)event_data;
             if (enabled) {
+                s_mgr.reconnect_suppressed = false;
                 if (! s_mgr.interface_started) {
                     esp_wifi_start();
                 }
             } else {
+                s_mgr.reconnect_suppressed = true;
+                if (s_mgr.reconnect_timer) {
+                    xTimerStop(s_mgr.reconnect_timer, 0);
+                }
                 if (s_mgr.interface_started) {
                     set_scanning(false);
                     esp_wifi_stop();
@@ -397,6 +473,7 @@ static void on_ui_request(void* arg, esp_event_base_t event_base, int32_t event_
         break;
     case APP_SETTINGS_WIFI_EVENT_CONNECT_REQ:
         if (! s_mgr.connected && s_mgr.interface_started) {
+            s_mgr.reconnect_suppressed = false;
             if (event_data) {
                 app_settings_wifi_connect_data_t* payload = (app_settings_wifi_connect_data_t*)event_data;
                 
@@ -426,6 +503,10 @@ static void on_ui_request(void* arg, esp_event_base_t event_base, int32_t event_
         break;
     case APP_SETTINGS_WIFI_EVENT_DISCONNECT_REQ:
         if (s_mgr.connected) {
+            s_mgr.reconnect_suppressed = true;
+            if (s_mgr.reconnect_timer) {
+                xTimerStop(s_mgr.reconnect_timer, 0);
+            }
             wifi_disconnect();
         }
         xSemaphoreGiveRecursive(s_mgr.mutex);
@@ -501,6 +582,9 @@ static void on_uart_event(void* arg, esp_event_base_t event_base, int32_t event_
             
             if (was_connected) {
                 ESP_LOGI(TAG, "Disconnecting from current network");
+                xSemaphoreTakeRecursive(s_mgr.mutex, portMAX_DELAY);
+                s_mgr.reconnect_suppressed = true;
+                xSemaphoreGiveRecursive(s_mgr.mutex);
                 wifi_disconnect();
                 vTaskDelay(pdMS_TO_TICKS(500));
             }
@@ -512,6 +596,7 @@ static void on_uart_event(void* arg, esp_event_base_t event_base, int32_t event_
             
             s_mgr.pending_connect = true;
             s_mgr.pending_connect_from_uart_credentials = true;
+            s_mgr.reconnect_suppressed = false;
             credentials_set_pending_ssid(ssid_to_use);
             
             xSemaphoreGiveRecursive(s_mgr.mutex);
@@ -710,6 +795,8 @@ void wifi_ctrl_init()
     }
 
     s_mgr.save_timer = xTimerCreate("wifi_save_timer", pdMS_TO_TICKS(3000), pdFALSE, NULL, save_state_timer_cb);
+    s_mgr.reconnect_timer = xTimerCreate("wifi_reconnect_timer", pdMS_TO_TICKS(WIFI_RECONNECT_DELAY_MS),
+                                        pdFALSE, NULL, reconnect_timer_cb);
     
     s_mgr.scanning                              = false;
     s_mgr.scan_requested                        = false;
@@ -720,6 +807,8 @@ void wifi_ctrl_init()
     s_mgr.uart_password_ready                   = false;
     s_mgr.auto_start_wifi                        = false;
     s_mgr.auto_connect_from_saved                = false;
+    s_mgr.reconnect_suppressed                   = false;
+    s_mgr.ip_lost                                = false;
     s_mgr.initialized                           = true;
     s_mgr.scan_interval_ms                      = 10000;
     s_mgr.scan_cooldown_ms                      = 3000;
@@ -751,6 +840,12 @@ void wifi_ctrl_deinit()
     if (s_mgr.save_timer) {
         xTimerStop(s_mgr.save_timer, 0);
         xTimerDelete(s_mgr.save_timer, 0);
+    }
+
+    if (s_mgr.reconnect_timer) {
+        xTimerStop(s_mgr.reconnect_timer, 0);
+        xTimerDelete(s_mgr.reconnect_timer, 0);
+        s_mgr.reconnect_timer = NULL;
     }
 
     if (s_mgr.scan_task_handle) {

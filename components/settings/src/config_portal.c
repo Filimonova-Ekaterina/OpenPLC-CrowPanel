@@ -70,7 +70,6 @@ static size_t s_scan_result_count = 0;
 static char *s_cached_html_page = NULL;
 static bool s_html_cache_valid = false;
 static bool s_data_saved = false;
-static SemaphoreHandle_t s_portal_starting_sem = NULL;
 static bool s_portal_starting = false;
 
 static const char *kWifiSetupPageTemplate =

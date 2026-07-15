@@ -321,7 +321,9 @@ void wifi_menu_deactivate(void)
                    &payload, sizeof(payload), 0);
 
     if (s_wifi_menu.portal_running || config_portal_is_running()) {
-        config_portal_stop_async();
+        /* Release the Wi-Fi portal HTTP server before another settings
+         * section starts its own server on port 80. */
+        config_portal_stop();
         s_wifi_menu.portal_running = false;
     }
     

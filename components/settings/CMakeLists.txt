@@ -4,10 +4,13 @@ idf_component_register(
         "src/ui/password_dialog.c"
         "src/ui/message_box.c"
         "src/ui/openplc_settings.c"
+        "src/ui/system_settings.c"
         "src/settings_events.c"
         "src/settings_config.c"
+        "src/time_sync.c"
         "src/credentials.c"
         "src/config_portal.c"
+        "src/openplc_config_portal.c"
         "src/wifi.c"
         "src/wifi_ctrl.c"
         "src/wifi_connectivity.c"
@@ -19,7 +22,9 @@ idf_component_register(
         driver
         nvs_flash
         esp_wifi
+        esp_netif
         esp_http_server
         sleep_mode
         esp_driver_uart
+        espressif__esp32_p4_function_ev_board
 )

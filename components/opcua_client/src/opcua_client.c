@@ -12,6 +12,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "opcua_open62541.h"
+#include "time_sync.h"
 #include "wifi_ctrl.h"
 
 #define OPCUA_WRITE_QUEUE_LENGTH 12
@@ -46,6 +47,8 @@ struct opcua_client
     SemaphoreHandle_t configuration_mutex;
     TaskHandle_t task_handle;
     volatile bool stop_requested;
+    volatile bool pause_requested;
+    uint32_t pause_depth;
     volatile bool reconnect_requested;
     opcua_client_state_t state;
     char status[OPCUA_STATUS_LENGTH];
@@ -55,6 +58,7 @@ static const char* TAG = "opcua_client";
 
 static void client_task(void* argument);
 static bool network_is_ready(void);
+static void wait_for_retry(opcua_client_t* context);
 static void set_status(opcua_client_t* context, opcua_client_state_t state, const char* details);
 static UA_StatusCode discover_address_space(opcua_client_t* context);
 static UA_StatusCode browse_children(opcua_client_t* context, const UA_NodeId* parent_node_id,
@@ -136,6 +140,8 @@ esp_err_t opcua_client_start(opcua_client_t* client)
     }
 
     client->stop_requested = false;
+    client->pause_requested = false;
+    client->pause_depth = 0;
     BaseType_t created     = xTaskCreate(client_task, "opcua_client", client->configuration.task_stack_size, client,
                                          client->configuration.task_priority, &client->task_handle);
     return created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
@@ -145,6 +151,33 @@ void opcua_client_stop(opcua_client_t* client)
 {
     if (client != NULL) {
         client->stop_requested = true;
+    }
+}
+
+void opcua_client_pause(opcua_client_t* client)
+{
+    if (client != NULL) {
+        xSemaphoreTake(client->configuration_mutex, portMAX_DELAY);
+        client->pause_depth++;
+        client->pause_requested = true;
+        client->reconnect_requested = true;
+        uint32_t pause_depth = client->pause_depth;
+        xSemaphoreGive(client->configuration_mutex);
+        ESP_LOGI(TAG, "Network activity paused (depth=%" PRIu32 ")", pause_depth);
+    }
+}
+
+void opcua_client_resume(opcua_client_t* client)
+{
+    if (client != NULL) {
+        xSemaphoreTake(client->configuration_mutex, portMAX_DELAY);
+        if (client->pause_depth > 0) {
+            client->pause_depth--;
+        }
+        client->pause_requested = client->pause_depth > 0;
+        uint32_t pause_depth = client->pause_depth;
+        xSemaphoreGive(client->configuration_mutex);
+        ESP_LOGI(TAG, "Network pause released (depth=%" PRIu32 ")", pause_depth);
     }
 }
 
@@ -232,6 +265,10 @@ const char* opcua_client_state_name(opcua_client_state_t state)
     switch (state) {
     case OPCUA_CLIENT_WAITING_FOR_WIFI:
         return "WAITING_FOR_WIFI";
+    case OPCUA_CLIENT_PAUSED:
+        return "PAUSED";
+    case OPCUA_CLIENT_WAITING_FOR_TIME:
+        return "WAITING_FOR_TIME";
     case OPCUA_CLIENT_CONNECTING:
         return "CONNECTING";
     case OPCUA_CLIENT_BROWSING:
@@ -253,12 +290,36 @@ static void client_task(void* argument)
     char endpoint_url[OPCUA_CLIENT_ENDPOINT_LENGTH];
 
     while (! context->stop_requested) {
+        while (context->pause_requested && ! context->stop_requested) {
+            set_status(context, OPCUA_CLIENT_PAUSED, "Paused while settings are open");
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        if (context->stop_requested) {
+            break;
+        }
         while (! network_is_ready() && ! context->stop_requested) {
+            if (context->pause_requested) {
+                break;
+            }
             set_status(context, OPCUA_CLIENT_WAITING_FOR_WIFI, "Waiting for Wi-Fi and an IP address");
             vTaskDelay(pdMS_TO_TICKS(500));
         }
         if (context->stop_requested) {
             break;
+        }
+        if (context->pause_requested) {
+            continue;
+        }
+
+        while (!time_sync_is_valid() && !context->stop_requested && !context->pause_requested) {
+            set_status(context, OPCUA_CLIENT_WAITING_FOR_TIME, "Waiting for SNTP clock synchronization");
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+        if (context->stop_requested) {
+            break;
+        }
+        if (context->pause_requested) {
+            continue;
         }
 
         xSemaphoreTake(context->configuration_mutex, portMAX_DELAY);
@@ -269,7 +330,7 @@ static void client_task(void* argument)
         context->ua_client = UA_Client_new();
         if (context->ua_client == NULL) {
             set_status(context, OPCUA_CLIENT_CONNECTION_ERROR, "Cannot allocate open62541 client");
-            vTaskDelay(pdMS_TO_TICKS(context->configuration.reconnect_delay_ms));
+            wait_for_retry(context);
             continue;
         }
 
@@ -285,7 +346,7 @@ static void client_task(void* argument)
             set_status(context, OPCUA_CLIENT_CONNECTION_ERROR, details);
             UA_Client_delete(context->ua_client);
             context->ua_client = NULL;
-            vTaskDelay(pdMS_TO_TICKS(context->configuration.reconnect_delay_ms));
+            wait_for_retry(context);
             continue;
         }
 
@@ -299,7 +360,7 @@ static void client_task(void* argument)
             UA_Client_disconnect(context->ua_client);
             UA_Client_delete(context->ua_client);
             context->ua_client = NULL;
-            vTaskDelay(pdMS_TO_TICKS(context->configuration.reconnect_delay_ms));
+            wait_for_retry(context);
             continue;
         }
 
@@ -311,7 +372,8 @@ static void client_task(void* argument)
         set_status(context, OPCUA_CLIENT_CONNECTED, connected_details);
         ESP_LOGI(TAG, "%s", connected_details);
 
-        while (! context->stop_requested && ! context->reconnect_requested && network_is_ready()) {
+        while (! context->stop_requested && ! context->pause_requested &&
+               ! context->reconnect_requested && network_is_ready()) {
             process_write_requests(context);
             status = UA_Client_run_iterate(context->ua_client, 100);
             if (status != UA_STATUSCODE_GOOD) {
@@ -320,7 +382,9 @@ static void client_task(void* argument)
             }
         }
 
-        if (context->reconnect_requested) {
+        if (context->pause_requested) {
+            set_status(context, OPCUA_CLIENT_PAUSED, "Paused while settings are open");
+        } else if (context->reconnect_requested) {
             set_status(context, OPCUA_CLIENT_CONNECTING, "Endpoint changed; reconnecting");
         } else {
             set_status(context, OPCUA_CLIENT_CONNECTION_ERROR, "Connection lost; retrying");
@@ -329,13 +393,23 @@ static void client_task(void* argument)
         UA_Client_delete(context->ua_client);
         context->ua_client       = NULL;
         context->subscription_id = 0;
-        vTaskDelay(pdMS_TO_TICKS(context->configuration.reconnect_delay_ms));
+        wait_for_retry(context);
     }
 
     clear_tag_node_ids(context);
     set_status(context, OPCUA_CLIENT_STOPPED, "Client stopped");
     context->task_handle = NULL;
     vTaskDelete(NULL);
+}
+
+static void wait_for_retry(opcua_client_t* context)
+{
+    uint32_t waited_ms = 0;
+    while (waited_ms < context->configuration.reconnect_delay_ms &&
+           !context->stop_requested && !context->pause_requested) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        waited_ms += 100;
+    }
 }
 
 static bool network_is_ready(void)

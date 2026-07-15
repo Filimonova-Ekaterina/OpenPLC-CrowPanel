@@ -59,6 +59,12 @@ ExternalProject_Add(open62541_codegen
     BUILD_BYPRODUCTS "${OPEN62541_SOURCE}" "${OPEN62541_HEADER}"
 )
 
+# Rebuild the amalgamation when an ESP portability source changes. Otherwise
+# ExternalProject's completed stamp can leave a stale generated open62541.c.
+ExternalProject_Add_StepDependencies(open62541_codegen build
+    "${OPEN62541_VENDOR_DIR}/arch/posix/ua_clock.c"
+)
+
 set_source_files_properties("${OPEN62541_SOURCE}" PROPERTIES GENERATED TRUE)
 
 idf_component_register(

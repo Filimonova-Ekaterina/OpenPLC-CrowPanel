@@ -23,6 +23,14 @@ void wifi_init(void)
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+
+    /* Display sleep only turns off the LCD. Keep the station radio awake so
+     * ESP-Hosted does not drop the link while the HMI is idle. */
+    esp_err_t power_save_result = esp_wifi_set_ps(WIFI_PS_NONE);
+    if (power_save_result != ESP_OK) {
+        ESP_LOGW(TAG, "Unable to disable WiFi power save: %s",
+                 esp_err_to_name(power_save_result));
+    }
 }
 
 void wifi_deinit(void)

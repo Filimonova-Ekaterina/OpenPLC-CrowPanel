@@ -45,9 +45,12 @@ UA_DateTime UA_DateTime_nowMonotonic(void) {
     clock_get_time(cclock, &mts);
     mach_port_deallocate(mach_task_self(), cclock);
     return (mts.tv_sec * UA_DATETIME_SEC) + (mts.tv_nsec / 100);
-#elif !defined(CLOCK_MONOTONIC_RAW)
+#elif defined(ESP_PLATFORM) || !defined(CLOCK_MONOTONIC_RAW)
+    /* ESP-IDF supports CLOCK_MONOTONIC. CLOCK_MONOTONIC_RAW may be exposed by
+     * compatibility headers but is not a valid clock source on ESP32-P4. */
     struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
+    if(clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
     return (ts.tv_sec * UA_DATETIME_SEC) + (ts.tv_nsec / 100);
 #else
     struct timespec ts;

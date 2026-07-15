@@ -3,6 +3,7 @@
 #include "driver/uart.h"
 #include "esp_crc.h"
 #include "esp_log.h"
+#include "settings_events.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -20,7 +21,7 @@ static const char* UART_TAG = "UART_HANDLER";
 #define UART_QUEUE_SIZE  20
 #define MAX_PASSWORD_LEN 64
 #define MAX_KEY_LEN      256
-#define MAX_SSID_LEN     33
+#define UART_SSID_BUFFER_LENGTH 33
 #define JSON_BUF_SIZE    1024
 #define MAX_HA_URL_LEN   256
 #define MAX_HA_LOGIN_LEN 65
@@ -31,7 +32,7 @@ static const char* UART_TAG = "UART_HANDLER";
 
 static uart_handler_callbacks_t s_callbacks = {0};
 static char wifi_password[MAX_PASSWORD_LEN] = {0};
-static char wifi_ssid[MAX_SSID_LEN] = {0};
+static char wifi_ssid[UART_SSID_BUFFER_LENGTH] = {0};
 static char weather_api_key[MAX_KEY_LEN] = {0};
 static char calendar_api_key[MAX_KEY_LEN] = {0};
 
@@ -60,10 +61,46 @@ static void uart_event_task(void* arg);
 static bool parse_wifi_password_json(const char* json_str);
 static bool parse_api_keys_json(const char* json_str);
 static bool parse_ha_creds_json(const char* json_str);
+static bool parse_opcua_endpoint_json(const char* json_str);
 static uint32_t calculate_crc32(const char* data);
 static void trim_newline(char* s);
 static void uart_send_response(const char* response);
 static void notify_keys_received(void);
+
+static bool parse_opcua_endpoint_json(const char* json_str)
+{
+    cJSON* root = cJSON_Parse(json_str);
+    if (root == NULL) {
+        return false;
+    }
+
+    cJSON* type_item = cJSON_GetObjectItem(root, "type");
+    cJSON* endpoint_item = cJSON_GetObjectItem(root, "endpoint");
+    bool valid_type = cJSON_IsString(type_item) &&
+                      (strcmp(type_item->valuestring, "openplc_config") == 0 ||
+                       strcmp(type_item->valuestring, "opcua_config") == 0);
+    bool valid_endpoint = cJSON_IsString(endpoint_item) &&
+                          strncmp(endpoint_item->valuestring, "opc.tcp://", 10) == 0 &&
+                          strlen(endpoint_item->valuestring) < sizeof(((app_settings_uart_opcua_endpoint_data_t*)0)->endpoint);
+    if (! valid_type || ! valid_endpoint) {
+        cJSON_Delete(root);
+        return false;
+    }
+
+    app_settings_uart_opcua_endpoint_data_t payload = {0};
+    strlcpy(payload.endpoint, endpoint_item->valuestring, sizeof(payload.endpoint));
+    payload.length = (uint16_t)strlen(payload.endpoint);
+    esp_err_t post_result = esp_event_post(APP_SETTINGS_UART_EVENTS,
+                                           APP_SETTINGS_UART_EVENT_RECEIVED_OPCUA_ENDPOINT,
+                                           &payload, sizeof(payload), portMAX_DELAY);
+    cJSON_Delete(root);
+    if (post_result != ESP_OK) {
+        ESP_LOGE(UART_TAG, "Cannot publish OPC UA endpoint: %s", esp_err_to_name(post_result));
+        return false;
+    }
+    uart_send_response("{\"status\":\"OK\",\"message\":\"OPC UA endpoint received\"}");
+    return true;
+}
 
 static void trim_newline(char* s)
 {
@@ -347,9 +384,9 @@ static bool parse_wifi_password_json(const char* json_str)
         ssid = ssid_item->valuestring;
         size_t ssid_len = strlen(ssid);
         
-        if (ssid_len > 0 && ssid_len < MAX_SSID_LEN) {
+        if (ssid_len > 0 && ssid_len < UART_SSID_BUFFER_LENGTH) {
             xSemaphoreTake(s_data_mutex, portMAX_DELAY);
-            strlcpy(wifi_ssid, ssid, MAX_SSID_LEN);
+            strlcpy(wifi_ssid, ssid, UART_SSID_BUFFER_LENGTH);
             ssid_received = true;
             xSemaphoreGive(s_data_mutex);
             ESP_LOGI(UART_TAG, "WiFi SSID received: %s", wifi_ssid);
@@ -489,6 +526,7 @@ static void uart_event_task(void* arg)
                     } else {
                         const char* patterns[] = {"{\"type\":\"wifi_password\"", "{\"type\":\"wifi_config\"",
                                                   "{\"type\":\"api_keys\"", "{\"type\":\"ha_creds\"",
+                                                  "{\"type\":\"openplc_config\"", "{\"type\":\"opcua_config\"",
                                                   "{\"password\"", NULL};
                         for (int i = 0; patterns[i] != NULL; i++) {
                             char* possible_json = strstr(json_start, patterns[i]);
@@ -513,6 +551,9 @@ static void uart_event_task(void* arg)
                             success = parse_wifi_password_json(json_start);
                         } else if (strstr(json_start, "\"type\":\"ha_creds\"") != NULL) {
                             success = parse_ha_creds_json(json_start);
+                        } else if (strstr(json_start, "\"type\":\"openplc_config\"") != NULL ||
+                                   strstr(json_start, "\"type\":\"opcua_config\"") != NULL) {
+                            success = parse_opcua_endpoint_json(json_start);
                         } else {
                             if (strstr(json_start, "\"password\"") != NULL) {
                                 success = parse_wifi_password_json(json_start);

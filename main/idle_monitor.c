@@ -11,6 +11,7 @@
 #include "idle_monitor.h"
 #include "sleep_mode.h"
 #include "settings_config.h"
+#include "system_settings.h"
 
 // defined in bsp component
 extern esp_lcd_touch_handle_t tp;
@@ -19,6 +20,17 @@ static SemaphoreHandle_t touch_activity_sem = NULL;
 static TimerHandle_t touch_debounce_timer   = NULL;
 
 static const char* TAG = "idle monitor";
+
+static void sleep_event_callback(sleep_evt_t event, void* context)
+{
+    (void)context;
+    if (event == SLEEP_EVT_WAKE) {
+        esp_err_t result = system_settings_restore_async();
+        if (result != ESP_OK) {
+            ESP_LOGW(TAG, "Cannot schedule system settings restore after wake: %s", esp_err_to_name(result));
+        }
+    }
+}
 
 static esp_err_t sleep_brightness_set_fcnc(void* ctx, uint8_t pct)
 {
@@ -58,7 +70,7 @@ esp_err_t idle_monitor_init()
     ESP_LOGI(TAG, "Loading saved brightness: %d%%", saved_brightness);
     
     sleep_cfg_t sleep_cfg = {
-        .idle_timeout_ms       = 180000,
+        .idle_timeout_ms       = settings_config_load_sleep_timeout_ms(),
         .normal_brightness_pct = saved_brightness,
         .sleep_brightness_pct  = 0,
         .brightness_init       = NULL,
@@ -70,6 +82,7 @@ esp_err_t idle_monitor_init()
         ESP_LOGE(TAG, "Failed to init sleep mode");
         return ESP_FAIL;
     }
+    sleep_set_event_cb(sleep_event_callback, NULL);
 
     touch_activity_sem = xSemaphoreCreateBinary();
     if (! touch_activity_sem) {

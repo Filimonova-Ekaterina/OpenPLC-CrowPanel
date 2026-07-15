@@ -14,8 +14,11 @@ Active components:
 - `components/settings` — Wi-Fi setup and persistent OpenPLC endpoint settings.
 - `simulator` — Python compressed-air OPC UA test server.
 
-The OPC UA endpoint is configured on the panel under **Settings > OpenPLC**. It
-is saved in NVS and applied immediately by reconnecting the client.
+The OPC UA endpoint is configured with the gear button under
+**Settings > OpenPLC**. The preconfigured endpoint is marked `default`; a saved
+value is stored in NVS and applied immediately by reconnecting the client.
+The same OpenPLC page exposes a local QR setup portal and accepts UART JSON in
+the form `{"type":"openplc_config","endpoint":"opc.tcp://server:4840"}`.
 
 See [CrowPanel prototype guide](docs/CROWPANEL_OPCUA_PROTOTYPE.md) and
 [simulator instructions](simulator/README.md) for the test procedure.

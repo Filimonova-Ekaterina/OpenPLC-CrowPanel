@@ -21,7 +21,9 @@ extern "C" {
 typedef enum
 {
     OPCUA_CLIENT_STOPPED = 0,
+    OPCUA_CLIENT_PAUSED,
     OPCUA_CLIENT_WAITING_FOR_WIFI,
+    OPCUA_CLIENT_WAITING_FOR_TIME,
     OPCUA_CLIENT_CONNECTING,
     OPCUA_CLIENT_BROWSING,
     OPCUA_CLIENT_CONNECTED,
@@ -52,6 +54,12 @@ esp_err_t opcua_client_start(opcua_client_t* client);
 
 /** Request a clean background-task stop. */
 void opcua_client_stop(opcua_client_t* client);
+
+/** Suspend all OPC UA network activity while a configuration screen is open. */
+void opcua_client_pause(opcua_client_t* client);
+
+/** Resume connection attempts after leaving configuration screens. */
+void opcua_client_resume(opcua_client_t* client);
 
 /** Queue a Boolean write so LVGL never blocks on network I/O. */
 esp_err_t opcua_client_write_boolean(opcua_client_t* client, size_t tag_index, bool value);

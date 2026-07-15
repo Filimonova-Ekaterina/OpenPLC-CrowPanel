@@ -46,7 +46,7 @@ esp_err_t settings_config_save_audio_volume(uint8_t volume)
         return err;
     }
 
-    err = nvs_set_u8(nvs_handle, "audio_volume", volume);
+    err = nvs_set_u8(nvs_handle, NVS_KEY_AUDIO_VOLUME, volume);
     if (err == ESP_OK) {
         err = nvs_commit(nvs_handle);
     }
@@ -65,7 +65,7 @@ uint8_t settings_config_load_audio_volume(void)
 
     esp_err_t err = nvs_open(NVS_CONFIG_NAMESPACE, NVS_READONLY, &nvs_handle);
     if (err == ESP_OK) {
-        (void)nvs_get_u8(nvs_handle, "audio_volume", &volume);
+        (void)nvs_get_u8(nvs_handle, NVS_KEY_AUDIO_VOLUME, &volume);
         nvs_close(nvs_handle);
     }
 
@@ -308,6 +308,9 @@ esp_err_t settings_config_clear_all(void)
 
 esp_err_t settings_config_save_brightness(uint8_t brightness)
 {
+    if (brightness < 1U || brightness > 100U) {
+        return ESP_ERR_INVALID_ARG;
+    }
     nvs_handle_t nvs_handle;
     esp_err_t err = nvs_open(NVS_CONFIG_NAMESPACE, NVS_READWRITE, &nvs_handle);
     if (err != ESP_OK) {
@@ -315,14 +318,16 @@ esp_err_t settings_config_save_brightness(uint8_t brightness)
         return err;
     }
 
-    err = nvs_set_u8(nvs_handle, "brightness", brightness);
+    err = nvs_set_u8(nvs_handle, NVS_KEY_BRIGHTNESS, brightness);
     if (err == ESP_OK) {
         err = nvs_commit(nvs_handle);
     }
 
     nvs_close(nvs_handle);
-    sleep_update_normal_brightness(brightness);
-    ESP_LOGI(TAG, "Brightness saved: %d", brightness);
+    if (err == ESP_OK) {
+        sleep_update_normal_brightness(brightness);
+        ESP_LOGI(TAG, "Brightness saved: %d", brightness);
+    }
     return err;
 }
 
@@ -333,11 +338,11 @@ uint8_t settings_config_load_brightness(void)
 
     esp_err_t err = nvs_open(NVS_CONFIG_NAMESPACE, NVS_READONLY, &nvs_handle);
     if (err == ESP_OK) {
-        nvs_get_u8(nvs_handle, "brightness", &brightness);
+        (void)nvs_get_u8(nvs_handle, NVS_KEY_BRIGHTNESS, &brightness);
         nvs_close(nvs_handle);
     }
 
-    return brightness;
+    return brightness >= 1U && brightness <= 100U ? brightness : 80U;
 }
 
 esp_err_t settings_config_save_ha_enabled(bool enabled)
@@ -589,4 +594,19 @@ esp_err_t settings_config_load_opcua_endpoint(char* endpoint_url, size_t length,
 
     snprintf(endpoint_url, length, "%s", default_endpoint_url);
     return result == ESP_ERR_NVS_NOT_FOUND ? ESP_OK : result;
+}
+
+bool settings_config_has_saved_opcua_endpoint(void)
+{
+    char endpoint_url[SETTINGS_OPCUA_ENDPOINT_LENGTH] = {0};
+    nvs_handle_t nvs_handle;
+    esp_err_t result = nvs_open(NVS_CONFIG_NAMESPACE, NVS_READONLY, &nvs_handle);
+    if (result != ESP_OK) {
+        return false;
+    }
+
+    size_t required_length = sizeof(endpoint_url);
+    result = nvs_get_str(nvs_handle, NVS_KEY_OPCUA_ENDPOINT, endpoint_url, &required_length);
+    nvs_close(nvs_handle);
+    return result == ESP_OK && strncmp(endpoint_url, "opc.tcp://", 10) == 0;
 }

@@ -40,6 +40,7 @@ void uart_password_handler_stop(void);
  * @brief Check if the UART handler is currently running.
  */
 bool uart_password_handler_is_active(void);
+bool uart_password_handler_is_initialized(void);
 
 const char* uart_password_handler_get_ssid(void);
 

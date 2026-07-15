@@ -43,6 +43,7 @@ typedef enum
     APP_SETTGINS_UART_EVENT_RECIEVED_CALENDAR_CRED,
     APP_SETTINGS_UART_EVENT_PORTAL_STOPPED,
     APP_SETTGINS_UART_EVENT_RECIEVED_HA_CRED,
+    APP_SETTINGS_UART_EVENT_RECEIVED_OPCUA_ENDPOINT,
 } app_settings_uart_event_t;
 
 typedef enum
@@ -132,6 +133,12 @@ typedef struct
     uint16_t ws_port;
 } app_settings_uart_ha_cred_data_t;
 
+typedef struct
+{
+    char endpoint[256];
+    uint16_t length;
+} app_settings_uart_opcua_endpoint_data_t;
+
 static inline const char* app_settings_wifi_event_to_string(app_settings_wifi_event_t event)
 {
     switch (event) {
@@ -183,6 +190,8 @@ static inline const char* app_settings_uart_event_to_string(app_settings_uart_ev
         return "APP_SETTINGS_UART_EVENT_RECEIVED_WEATHER_CRED";
     case APP_SETTGINS_UART_EVENT_RECIEVED_CALENDAR_CRED:
         return "APP_SETTINGS_UART_EVENT_RECEIVED_CALENDAR_CRED";
+    case APP_SETTINGS_UART_EVENT_RECEIVED_OPCUA_ENDPOINT:
+        return "APP_SETTINGS_UART_EVENT_RECEIVED_OPCUA_ENDPOINT";
     default:
         return "UNKNOWN_UART_EVENT";
     }
