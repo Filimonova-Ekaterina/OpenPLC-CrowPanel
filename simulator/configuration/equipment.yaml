@@ -30,6 +30,7 @@ station:
       browse_name: "ResetAlarms"
       display_name: "Reset all alarms"
       description: "Write True to clear all active simulator alarms; resets automatically"
+      semantic_role: "alarm_reset_command"
       initial_value: false
 
 compressor_defaults: &compressor_defaults
@@ -49,6 +50,7 @@ compressor_defaults: &compressor_defaults
       description: "Simulated compressor discharge temperature"
       initial_value: 25.0
       engineering_unit: "°C"
+      semantic_role: "temperature"
       minimum: -40.0
       maximum: 180.0
     motor_current:
@@ -57,6 +59,7 @@ compressor_defaults: &compressor_defaults
       description: "Simulated electric motor current"
       initial_value: 0.0
       engineering_unit: "A"
+      semantic_role: "motor_current"
       minimum: 0.0
       maximum: 60.0
     runtime:
@@ -65,29 +68,40 @@ compressor_defaults: &compressor_defaults
       description: "Total time during which this compressor has run"
       initial_value: 0.0
       engineering_unit: "h"
+      semantic_role: "runtime"
       minimum: 0.0
       maximum: 1000000.0
     run_status:
       browse_name: "RunStatus"
       display_name: "Running"
       description: "True while the compressor is producing air"
+      semantic_role: "operating_status"
       initial_value: false
     alarm_status:
       browse_name: "AlarmStatus"
       display_name: "Alarm active"
       description: "True while this compressor has one or more active alarms"
+      semantic_role: "alarm_status"
       initial_value: false
   commands: &compressor_commands
     run_command:
       browse_name: "runCommand"
-      display_name: "Manual run command"
-      description: "Write True to force this compressor to run; False restores automatic dispatch"
+      display_name: "Run command"
+      description: "Desired RUN/STOP state; writing it places this compressor in manual mode"
       initial_value: false
+      semantic_role: "operating_command"
+    automatic_mode:
+      browse_name: "AutomaticMode"
+      display_name: "Automatic mode"
+      description: "True enables demand-based dispatch; False holds the Run command state"
+      initial_value: true
+      semantic_role: "automatic_mode"
     sensor_fault_command:
       browse_name: "SensorFaultCommand"
       display_name: "Inject sensor fault"
       description: "Write True to inject invalid temperature and current readings"
       initial_value: false
+      semantic_role: "fault_command"
 
 compressors:
   - <<: *compressor_defaults
@@ -124,6 +138,7 @@ receiver:
       description: "Absolute simulated receiver pressure"
       initial_value: 7.5
       engineering_unit: "bar"
+      semantic_role: "pressure"
       minimum: 0.0
       maximum: 10.0
 
@@ -138,6 +153,7 @@ dryer:
       display_name: "Running"
       description: "True while the air dryer is operating"
       initial_value: false
+      semantic_role: "operating_status"
 
 air_network:
   id: "air_network"
@@ -151,6 +167,7 @@ air_network:
       description: "Pressure after demand-related distribution losses"
       initial_value: 7.5
       engineering_unit: "bar"
+      semantic_role: "pressure"
       minimum: 0.0
       maximum: 10.0
     air_demand:
@@ -159,6 +176,7 @@ air_network:
       description: "Current plant compressed-air consumption"
       initial_value: 20.0
       engineering_unit: "m³/h"
+      semantic_role: "demand"
       minimum: 0.0
       maximum: 100.0
     total_power:
@@ -167,5 +185,6 @@ air_network:
       description: "Combined electrical power of running compressors"
       initial_value: 0.0
       engineering_unit: "kW"
+      semantic_role: "power"
       minimum: 0.0
       maximum: 100.0

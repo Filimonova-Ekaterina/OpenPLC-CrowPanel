@@ -39,6 +39,7 @@ typedef struct
     uint32_t subscription_interval_ms;
     uint32_t task_stack_size;
     unsigned task_priority;
+    size_t maximum_equipment_objects;
     size_t maximum_tags;
     unsigned maximum_browse_depth;
 } opcua_client_config_t;

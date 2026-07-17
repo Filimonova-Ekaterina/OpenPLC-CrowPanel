@@ -36,6 +36,13 @@ metadata is created from `configuration/equipment.yaml`. Writable command nodes
 allow compressor control, sensor-fault injection, and alarm reset. Alarm state
 changes also emit OPC UA events.
 
+Each compressor exposes `AutomaticMode` and `runCommand`. In automatic mode the
+run command mirrors the actual running state. Writing RUN or STOP from the HMI
+first disables automatic mode and then applies the requested state; enabling
+`AutomaticMode` returns the compressor to demand-based dispatch. `SemanticRole`
+properties let a generic client associate commands, operating status, alarms,
+and overview measurements without hardcoded equipment names.
+
 Run the model tests without starting hardware tools:
 
 ```powershell

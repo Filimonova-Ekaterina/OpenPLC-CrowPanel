@@ -90,6 +90,7 @@ static esp_err_t initialize_hmi_pipeline(void)
         .subscription_interval_ms = CONFIG_OPCUA_SUBSCRIPTION_INTERVAL_MS,
         .task_stack_size          = CONFIG_OPCUA_TASK_STACK_SIZE,
         .task_priority            = CONFIG_OPCUA_TASK_PRIORITY,
+        .maximum_equipment_objects = CONFIG_OPCUA_MAX_EQUIPMENT_OBJECTS,
         .maximum_tags             = CONFIG_OPCUA_MAX_TAGS,
         .maximum_browse_depth     = CONFIG_OPCUA_MAX_BROWSE_DEPTH,
     };

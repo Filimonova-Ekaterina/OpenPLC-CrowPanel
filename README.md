@@ -7,9 +7,9 @@ and generates LVGL equipment screens without hardcoded equipment names.
 Active components:
 
 - `components/open62541` — pinned OPC UA client library and ESP-IDF/lwIP port.
-- `components/opcua_client` — Browse, BrowseNext, Read, Subscription, Write, and reconnect.
-- `components/data_model` — thread-safe equipment and tag storage.
-- `components/ui_generator` — generated indicators, values, and controls.
+- `components/opcua_client` — Browse, Read, data/event subscriptions, Write, and reconnect.
+- `components/data_model` — thread-safe equipment, tag, and active-alarm storage.
+- `components/ui_generator` — generated overview, alarm list, indicators, values, and controls.
 - `components/navigation` — generated bottom-tab navigation.
 - `components/settings` — Wi-Fi setup and persistent OpenPLC endpoint settings.
 - `simulator` — Python compressed-air OPC UA test server.

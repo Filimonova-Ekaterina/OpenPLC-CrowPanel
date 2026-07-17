@@ -53,6 +53,25 @@ class StationModelTests(unittest.TestCase):
         station.update(1.0)
         self.assertLess(station.receiver_pressure_bar, initial_pressure)
 
+    def test_manual_mode_can_force_run_and_stop(self) -> None:
+        station = StationModel(self.configuration)
+        compressor = station.compressors[0]
+        station._calculate_demand = lambda: 80.0
+
+        compressor.automatic_mode = False
+        compressor.manual_run_command = False
+        station.update(0.1)
+        self.assertFalse(compressor.state.is_running)
+
+        compressor.manual_run_command = True
+        station.update(0.1)
+        self.assertTrue(compressor.state.is_running)
+
+        compressor.automatic_mode = True
+        compressor.manual_run_command = False
+        station.update(0.1)
+        self.assertTrue(compressor.state.is_running)
+
 
 if __name__ == "__main__":
     unittest.main()

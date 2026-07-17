@@ -33,6 +33,7 @@ class CompressorModel:
         self.rated_flow = float(configuration["rated_flow_m3h"])
         self.rated_power = float(configuration["rated_power_kw"])
         self.manual_run_command = False
+        self.automatic_mode = True
         self.sensor_fault_command = False
         self.state = CompressorState(
             temperature_celsius=float(configuration["stopped_temperature_c"]),
@@ -42,7 +43,7 @@ class CompressorModel:
     def update(self, automatic_run_request: bool, elapsed_seconds: float) -> None:
         """Advance this compressor by one simulation interval."""
 
-        should_run = automatic_run_request or self.manual_run_command
+        should_run = automatic_run_request if self.automatic_mode else self.manual_run_command
         self.state.is_running = should_run
 
         target_temperature = float(

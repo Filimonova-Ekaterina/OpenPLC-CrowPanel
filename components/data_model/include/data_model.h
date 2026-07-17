@@ -20,6 +20,10 @@ extern "C" {
 #define DATA_MODEL_NODE_ID_LENGTH      128
 #define DATA_MODEL_STRING_VALUE_LENGTH 96
 #define DATA_MODEL_UNIT_LENGTH         24
+#define DATA_MODEL_SEMANTIC_ROLE_LENGTH 32
+#define DATA_MODEL_ALARM_CODE_LENGTH   48
+#define DATA_MODEL_ALARM_REASON_LENGTH 128
+#define DATA_MODEL_MAX_ALARMS          32
 
 typedef enum
 {
@@ -56,6 +60,7 @@ typedef struct
     char browse_name[DATA_MODEL_NAME_LENGTH];
     char display_name[DATA_MODEL_NAME_LENGTH];
     char engineering_unit[DATA_MODEL_UNIT_LENGTH];
+    char semantic_role[DATA_MODEL_SEMANTIC_ROLE_LENGTH];
     data_model_type_t data_type;
     bool readable;
     bool writable;
@@ -66,6 +71,15 @@ typedef struct
     bool value_valid;
     data_model_value_t value;
 } data_model_tag_t;
+
+typedef struct
+{
+    char source_name[DATA_MODEL_NAME_LENGTH];
+    char alarm_code[DATA_MODEL_ALARM_CODE_LENGTH];
+    char reason[DATA_MODEL_ALARM_REASON_LENGTH];
+    uint16_t severity;
+    bool active;
+} data_model_alarm_t;
 
 typedef struct data_model data_model_t;
 
@@ -100,10 +114,21 @@ bool data_model_get_equipment(const data_model_t* model, size_t equipment_index,
 /** Copy one tag entry while holding the model lock internally. */
 bool data_model_get_tag(const data_model_t* model, size_t tag_index, data_model_tag_t* tag_out);
 
+/** Add, update, or clear an alarm identified by its source and alarm code. */
+esp_err_t data_model_update_alarm(data_model_t* model, const data_model_alarm_t* alarm);
+
+/** Clear alarms when the OPC UA session or discovered structure is replaced. */
+void data_model_clear_alarms(data_model_t* model);
+
+/** Return active alarms only; active_index is dense even if retained slots are inactive. */
+bool data_model_get_active_alarm(const data_model_t* model, size_t active_index, data_model_alarm_t* alarm_out);
+size_t data_model_active_alarm_count(const data_model_t* model);
+
 size_t data_model_equipment_count(const data_model_t* model);
 size_t data_model_tag_count(const data_model_t* model);
 uint32_t data_model_structure_generation(const data_model_t* model);
 uint32_t data_model_value_generation(const data_model_t* model);
+uint32_t data_model_alarm_generation(const data_model_t* model);
 
 /** Human-readable data type name for logs and diagnostics. */
 const char* data_model_type_name(data_model_type_t data_type);

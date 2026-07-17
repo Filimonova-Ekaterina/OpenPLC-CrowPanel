@@ -17,6 +17,7 @@
 
 #define OPCUA_WRITE_QUEUE_LENGTH 12
 #define OPCUA_STATUS_LENGTH 128
+#define OPCUA_EVENT_FIELD_COUNT 3
 
 typedef enum
 {
@@ -39,8 +40,10 @@ struct opcua_client
     data_model_t* data_model;
     UA_Client* ua_client;
     UA_NodeId* tag_node_ids;
+    UA_NodeId* equipment_node_ids;
     UA_UInt16* tag_builtin_type_indices;
     size_t mapped_tag_count;
+    size_t mapped_equipment_count;
     UA_UInt32 subscription_id;
     QueueHandle_t write_queue;
     SemaphoreHandle_t status_mutex;
@@ -70,6 +73,7 @@ static UA_StatusCode add_variable(opcua_client_t* context, const UA_ReferenceDes
                                   size_t equipment_index, unsigned depth);
 static void read_variable_metadata(opcua_client_t* context, const UA_NodeId* variable_node_id, data_model_tag_t* tag);
 static void create_subscriptions(opcua_client_t* context);
+static void create_event_subscriptions(opcua_client_t* context);
 static void process_write_requests(opcua_client_t* context);
 static void clear_tag_node_ids(opcua_client_t* context);
 static data_model_type_t map_data_type(const UA_NodeId* data_type_id);
@@ -78,12 +82,16 @@ static bool variant_to_model_value(const UA_Variant* variant, data_model_type_t 
                                    data_model_value_t* value_out);
 static void node_id_to_text(const UA_NodeId* node_id, char* buffer, size_t buffer_size);
 static void ua_string_to_text(const UA_String* source, char* buffer, size_t buffer_size);
+static void event_notification_callback(UA_Client* client, UA_UInt32 subscription_id, void* subscription_context,
+                                        UA_UInt32 monitored_item_id, void* monitored_item_context,
+                                        size_t event_field_count, UA_Variant* event_fields);
+static void configure_event_field(UA_SimpleAttributeOperand* operand, const char* browse_name);
 
 esp_err_t opcua_client_create(const opcua_client_config_t* configuration, data_model_t* data_model,
                               opcua_client_t** client_out)
 {
     if (configuration == NULL || configuration->endpoint_url == NULL || data_model == NULL || client_out == NULL ||
-        configuration->maximum_tags == 0) {
+        configuration->maximum_equipment_objects == 0 || configuration->maximum_tags == 0) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -93,15 +101,19 @@ esp_err_t opcua_client_create(const opcua_client_config_t* configuration, data_m
     }
 
     context->tag_node_ids = calloc(configuration->maximum_tags, sizeof(*context->tag_node_ids));
+    context->equipment_node_ids =
+        calloc(configuration->maximum_equipment_objects, sizeof(*context->equipment_node_ids));
     context->tag_builtin_type_indices =
         malloc(configuration->maximum_tags * sizeof(*context->tag_builtin_type_indices));
     context->write_queue         = xQueueCreate(OPCUA_WRITE_QUEUE_LENGTH, sizeof(write_request_t));
     context->status_mutex        = xSemaphoreCreateMutex();
     context->configuration_mutex = xSemaphoreCreateMutex();
     if (strlen(configuration->endpoint_url) >= sizeof(context->endpoint_url) || context->tag_node_ids == NULL ||
+        context->equipment_node_ids == NULL ||
         context->tag_builtin_type_indices == NULL || context->write_queue == NULL || context->status_mutex == NULL ||
         context->configuration_mutex == NULL) {
         free(context->tag_node_ids);
+        free(context->equipment_node_ids);
         free(context->tag_builtin_type_indices);
         if (context->write_queue != NULL) {
             vQueueDelete(context->write_queue);
@@ -586,9 +598,11 @@ static UA_StatusCode process_child_references(opcua_client_t* context, const UA_
 
             size_t equipment_index = DATA_MODEL_INVALID_INDEX;
             esp_err_t add_result   = data_model_add_equipment(context->data_model, &equipment, &equipment_index);
-            if (add_result != ESP_OK) {
+            if (add_result != ESP_OK || equipment_index >= context->configuration.maximum_equipment_objects) {
                 return UA_STATUSCODE_BADOUTOFMEMORY;
             }
+            UA_NodeId_copy(child_node_id, &context->equipment_node_ids[equipment_index]);
+            context->mapped_equipment_count = equipment_index + 1;
             ESP_LOGI(TAG, "%*s[Object] %s (%s)", (int)(depth * 2), "", equipment.display_name, equipment.node_id);
             result = browse_children(context, child_node_id, equipment_index, depth + 1);
         } else if (reference->nodeClass == UA_NODECLASS_VARIABLE &&
@@ -717,6 +731,10 @@ static void read_variable_metadata(opcua_client_t* context, const UA_NodeId* var
                 UA_Variant_hasScalarType(&property_value, &UA_TYPES[UA_TYPES_STRING])) {
                 ua_string_to_text((UA_String*)property_value.data, tag->engineering_unit,
                                   sizeof(tag->engineering_unit));
+            } else if (strcmp(property_name, "SemanticRole") == 0 &&
+                       UA_Variant_hasScalarType(&property_value, &UA_TYPES[UA_TYPES_STRING])) {
+                ua_string_to_text((UA_String*)property_value.data, tag->semantic_role,
+                                  sizeof(tag->semantic_role));
             } else if (strcmp(property_name, "Minimum") == 0) {
                 data_model_value_t value;
                 if (variant_to_model_value(&property_value, DATA_MODEL_TYPE_FLOAT, &value) ||
@@ -791,6 +809,122 @@ static void create_subscriptions(opcua_client_t* context)
             ESP_LOGW(TAG, "Cannot monitor %s: %s", tag.node_id, UA_StatusCode_name(item_result.statusCode));
         }
         UA_MonitoredItemCreateResult_clear(&item_result);
+    }
+    create_event_subscriptions(context);
+}
+
+static void create_event_subscriptions(opcua_client_t* context)
+{
+    for (size_t equipment_index = 0; equipment_index < context->mapped_equipment_count; ++equipment_index) {
+        UA_Byte event_notifier = 0;
+        UA_StatusCode read_status = UA_Client_readEventNotifierAttribute(
+            context->ua_client, context->equipment_node_ids[equipment_index], &event_notifier);
+        if (read_status != UA_STATUSCODE_GOOD || (event_notifier & UA_EVENTNOTIFIER_SUBSCRIBE_TO_EVENT) == 0) {
+            continue;
+        }
+
+        UA_EventFilter filter;
+        UA_EventFilter_init(&filter);
+        filter.selectClausesSize = OPCUA_EVENT_FIELD_COUNT;
+        filter.selectClauses = UA_Array_new(filter.selectClausesSize, &UA_TYPES[UA_TYPES_SIMPLEATTRIBUTEOPERAND]);
+        if (filter.selectClauses == NULL) {
+            ESP_LOGW(TAG, "Cannot allocate OPC UA event filter");
+            return;
+        }
+        configure_event_field(&filter.selectClauses[0], "SourceName");
+        configure_event_field(&filter.selectClauses[1], "Message");
+        configure_event_field(&filter.selectClauses[2], "Severity");
+
+        UA_MonitoredItemCreateRequest item =
+            UA_MonitoredItemCreateRequest_default(context->equipment_node_ids[equipment_index]);
+        item.itemToMonitor.attributeId = UA_ATTRIBUTEID_EVENTNOTIFIER;
+        item.requestedParameters.queueSize = 16;
+        item.requestedParameters.discardOldest = true;
+        item.requestedParameters.filter.encoding = UA_EXTENSIONOBJECT_DECODED;
+        item.requestedParameters.filter.content.decoded.type = &UA_TYPES[UA_TYPES_EVENTFILTER];
+        item.requestedParameters.filter.content.decoded.data = &filter;
+
+        UA_MonitoredItemCreateResult result = UA_Client_MonitoredItems_createEvent(
+            context->ua_client, context->subscription_id, UA_TIMESTAMPSTORETURN_BOTH, item, NULL,
+            event_notification_callback, NULL);
+        if (result.statusCode != UA_STATUSCODE_GOOD) {
+            ESP_LOGW(TAG, "Cannot monitor events for equipment %u: %s", (unsigned)equipment_index,
+                     UA_StatusCode_name(result.statusCode));
+        }
+        UA_MonitoredItemCreateResult_clear(&result);
+        UA_EventFilter_clear(&filter);
+    }
+}
+
+static void configure_event_field(UA_SimpleAttributeOperand* operand, const char* browse_name)
+{
+    UA_SimpleAttributeOperand_init(operand);
+    operand->typeDefinitionId = UA_NODEID_NUMERIC(0, UA_NS0ID_BASEEVENTTYPE);
+    operand->attributeId = UA_ATTRIBUTEID_VALUE;
+    operand->browsePathSize = 1;
+    operand->browsePath = UA_QualifiedName_new();
+    if (operand->browsePath != NULL) {
+        operand->browsePath[0] = UA_QUALIFIEDNAME_ALLOC(0, browse_name);
+    }
+}
+
+static void event_notification_callback(UA_Client* client, UA_UInt32 subscription_id, void* subscription_context,
+                                        UA_UInt32 monitored_item_id, void* monitored_item_context,
+                                        size_t event_field_count, UA_Variant* event_fields)
+{
+    (void)client;
+    (void)subscription_id;
+    (void)monitored_item_id;
+    (void)monitored_item_context;
+    opcua_client_t* context = subscription_context;
+    if (context == NULL || event_fields == NULL || event_field_count < OPCUA_EVENT_FIELD_COUNT ||
+        !UA_Variant_hasScalarType(&event_fields[0], &UA_TYPES[UA_TYPES_STRING]) ||
+        !UA_Variant_hasScalarType(&event_fields[1], &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]) ||
+        !UA_Variant_hasScalarType(&event_fields[2], &UA_TYPES[UA_TYPES_UINT16])) {
+        ESP_LOGW(TAG, "Ignored malformed OPC UA event notification");
+        return;
+    }
+
+    data_model_alarm_t alarm = {0};
+    ua_string_to_text((UA_String*)event_fields[0].data, alarm.source_name, sizeof(alarm.source_name));
+    UA_LocalizedText* localized_message = event_fields[1].data;
+    char message[DATA_MODEL_ALARM_REASON_LENGTH];
+    ua_string_to_text(&localized_message->text, message, sizeof(message));
+    alarm.severity = *(UA_UInt16*)event_fields[2].data;
+
+    const char* code_start = strchr(message, '[');
+    const char* code_end = code_start != NULL ? strchr(code_start + 1, ']') : NULL;
+    if (code_start == NULL || code_end == NULL || code_end == code_start + 1) {
+        ESP_LOGW(TAG, "Ignored event without alarm code: %s", message);
+        return;
+    }
+    size_t code_length = (size_t)(code_end - code_start - 1);
+    if (code_length >= sizeof(alarm.alarm_code)) {
+        code_length = sizeof(alarm.alarm_code) - 1;
+    }
+    memcpy(alarm.alarm_code, code_start + 1, code_length);
+    alarm.alarm_code[code_length] = '\0';
+    alarm.active = strstr(code_end, " ACTIVE:") != NULL;
+    bool cleared = strstr(code_end, " CLEARED:") != NULL;
+    if (!alarm.active && !cleared) {
+        ESP_LOGW(TAG, "Ignored event without ACTIVE/CLEARED state: %s", message);
+        return;
+    }
+
+    const char* reason = strstr(code_end, ":");
+    reason = reason != NULL ? reason + 1 : code_end + 1;
+    while (*reason == ' ') {
+        reason++;
+    }
+    size_t reason_length = strnlen(reason, sizeof(alarm.reason) - 1);
+    memcpy(alarm.reason, reason, reason_length);
+    alarm.reason[reason_length] = '\0';
+    esp_err_t update_result = data_model_update_alarm(context->data_model, &alarm);
+    if (update_result == ESP_OK) {
+        ESP_LOGI(TAG, "Alarm %s: %s / %s", alarm.active ? "ACTIVE" : "CLEARED", alarm.source_name,
+                 alarm.alarm_code);
+    } else {
+        ESP_LOGW(TAG, "Cannot store alarm event: %s", esp_err_to_name(update_result));
     }
 }
 
@@ -868,6 +1002,10 @@ static void clear_tag_node_ids(opcua_client_t* context)
         context->tag_builtin_type_indices[index] = UINT16_MAX;
     }
     context->mapped_tag_count = 0;
+    for (size_t index = 0; index < context->mapped_equipment_count; ++index) {
+        UA_NodeId_clear(&context->equipment_node_ids[index]);
+    }
+    context->mapped_equipment_count = 0;
 }
 
 static data_model_type_t map_data_type(const UA_NodeId* data_type_id)

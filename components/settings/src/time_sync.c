@@ -31,13 +31,14 @@ esp_err_t time_sync_init(void)
     setenv("TZ", "UTC0", 1);
     tzset();
 
-    esp_sntp_config_t configuration = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    esp_sntp_config_t configuration = ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(
+        3, ESP_SNTP_SERVER_LIST("pool.ntp.org", "time.cloudflare.com", "time.google.com"));
     configuration.sync_cb = synchronization_callback;
     configuration.smooth_sync = false;
     esp_err_t result = esp_netif_sntp_init(&configuration);
     if (result == ESP_OK) {
         s_initialized = true;
-        ESP_LOGI(TAG, "SNTP started; waiting for a valid wall clock");
+        ESP_LOGI(TAG, "SNTP started with 3 servers; waiting for a valid wall clock");
     }
     return result;
 }

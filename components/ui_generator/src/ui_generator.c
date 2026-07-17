@@ -15,7 +15,7 @@
 #define UI_REFRESH_PERIOD_MS  250
 #define UI_NAVIGATION_HEIGHT  76
 #define UI_NUMERIC_SCALE      100.0
-#define UI_OVERVIEW_TAG_LIMIT 6
+#define UI_HUMAN_NAME_LENGTH  128
 #define UI_BOOLEAN_WRITE_HOLD_MS 2000
 #define SETTINGS_SECTION_COUNT 3
 
@@ -48,6 +48,14 @@ typedef struct
     uint32_t pending_write_started;
 } generated_widget_binding_t;
 
+typedef struct
+{
+    size_t status_tag_index;
+    size_t alarm_tag_index;
+    lv_obj_t* state_indicator;
+    lv_obj_t* state_label;
+} overview_equipment_binding_t;
+
 struct ui_generator
 {
     lv_obj_t* root;
@@ -66,8 +74,14 @@ struct ui_generator
     generated_widget_binding_t* bindings;
     size_t binding_capacity;
     size_t binding_count;
+    overview_equipment_binding_t* overview_equipment;
+    size_t overview_equipment_count;
+    lv_obj_t* overview_running_value;
+    lv_obj_t* overview_alarm_value;
+    lv_obj_t* alarms_host;
     uint32_t observed_structure_generation;
     uint32_t observed_value_generation;
+    uint32_t observed_alarm_generation;
 };
 
 static const char* TAG = "ui_generator";
@@ -75,10 +89,14 @@ extern const lv_img_dsc_t settings_icon;
 
 static void refresh_timer_callback(lv_timer_t* timer);
 static void rebuild_interface(ui_generator_t* generator);
+static void create_overview(ui_generator_t* generator, lv_obj_t* page);
+static void update_overview(ui_generator_t* generator);
+static void rebuild_alarm_list(ui_generator_t* generator);
 static void create_equipment_section(ui_generator_t* generator, lv_obj_t* page,
                                      const data_model_equipment_t* equipment);
-static void create_tag_widget(ui_generator_t* generator, lv_obj_t* parent, const data_model_tag_t* tag,
-                              bool include_equipment_name);
+static size_t create_controls_section(ui_generator_t* generator, lv_obj_t* page,
+                                      const data_model_equipment_t* equipment);
+static void create_tag_widget(ui_generator_t* generator, lv_obj_t* parent, const data_model_tag_t* tag);
 static void update_widget(generated_widget_binding_t* binding, const data_model_tag_t* tag);
 static void boolean_switch_event(lv_event_t* event);
 static void numeric_slider_event(lv_event_t* event);
@@ -95,6 +113,12 @@ static void numeric_range(const data_model_tag_t* tag, double* minimum, double* 
 static void set_numeric_label(lv_obj_t* label, double value, const char* engineering_unit);
 static int32_t scale_numeric_for_widget(double value);
 static void copy_display_unit(char* destination, size_t destination_size, const char* source);
+static bool find_equipment_tag_by_role(const data_model_t* model, size_t equipment_index, const char* semantic_role,
+                                       data_model_tag_t* tag_out);
+static lv_obj_t* create_summary_card(lv_obj_t* parent, const char* caption, const char* value, lv_color_t accent);
+static void copy_equipment_group_name(char* destination, size_t destination_size,
+                                      const data_model_equipment_t* equipment);
+static void copy_humanized_name(char* destination, size_t destination_size, const char* source);
 
 esp_err_t ui_generator_create(lv_obj_t* parent, data_model_t* data_model, opcua_client_t* opcua_client,
                               ui_generator_t** generator_out)
@@ -197,11 +221,19 @@ static void refresh_timer_callback(lv_timer_t* timer)
     }
     lv_obj_set_style_bg_color(generator->status_indicator, status_color, LV_PART_MAIN);
 
+    uint32_t alarm_generation = data_model_alarm_generation(generator->data_model);
+    if (alarm_generation != generator->observed_alarm_generation) {
+        generator->observed_alarm_generation = alarm_generation;
+        rebuild_alarm_list(generator);
+        update_overview(generator);
+    }
+
     uint32_t value_generation = data_model_value_generation(generator->data_model);
     if (value_generation == generator->observed_value_generation) {
         return;
     }
     generator->observed_value_generation = value_generation;
+    update_overview(generator);
     for (size_t binding_index = 0; binding_index < generator->binding_count; ++binding_index) {
         generated_widget_binding_t* binding = &generator->bindings[binding_index];
         data_model_tag_t tag;
@@ -215,11 +247,18 @@ static void rebuild_interface(ui_generator_t* generator)
 {
     generator->observed_structure_generation = data_model_structure_generation(generator->data_model);
     generator->observed_value_generation     = UINT32_MAX;
+    generator->observed_alarm_generation     = UINT32_MAX;
     free(generator->bindings);
+    free(generator->overview_equipment);
     generator->bindings         = NULL;
     generator->binding_count    = 0;
     generator->binding_capacity = data_model_tag_count(generator->data_model) * 3 + 1;
     generator->bindings         = calloc(generator->binding_capacity, sizeof(*generator->bindings));
+    generator->overview_equipment = NULL;
+    generator->overview_equipment_count = 0;
+    generator->overview_running_value = NULL;
+    generator->overview_alarm_value = NULL;
+    generator->alarms_host = NULL;
 
     navigation_release(generator->navigation);
     generator->navigation = NULL;
@@ -232,33 +271,9 @@ static void rebuild_interface(ui_generator_t* generator)
 
     lv_obj_t* overview_page = navigation_add_page(generator->navigation, "Overview");
     style_page_as_grid(overview_page);
-    lv_obj_t* overview_card = lv_obj_create(overview_page);
-    lv_obj_set_size(overview_card, lv_pct(100), LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_color(overview_card, lv_color_hex(0x181818), LV_PART_MAIN);
-    lv_obj_set_style_border_color(overview_card, lv_color_hex(0x444444), LV_PART_MAIN);
-    lv_obj_set_style_border_width(overview_card, 2, LV_PART_MAIN);
-    lv_obj_set_style_radius(overview_card, 18, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(overview_card, 20, LV_PART_MAIN);
-    lv_obj_t* overview_title = lv_label_create(overview_card);
-    lv_label_set_text_fmt(overview_title,
-                          "%u equipment objects\n%u live tags\nInterface generated from OPC UA Address Space",
-                          (unsigned)data_model_equipment_count(generator->data_model),
-                          (unsigned)data_model_tag_count(generator->data_model));
-    lv_obj_set_style_text_color(overview_title, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(overview_title, &lv_font_montserrat_22, LV_PART_MAIN);
+    create_overview(generator, overview_page);
 
     size_t discovered_tag_count = data_model_tag_count(generator->data_model);
-    size_t overview_tag_count   = 0;
-    for (size_t tag_index = 0; tag_index < discovered_tag_count && overview_tag_count < UI_OVERVIEW_TAG_LIMIT;
-         ++tag_index) {
-        data_model_tag_t tag;
-        if (data_model_get_tag(generator->data_model, tag_index, &tag) && tag.readable &&
-            tag.data_type != DATA_MODEL_TYPE_UNKNOWN) {
-            create_tag_widget(generator, overview_page, &tag, true);
-            overview_tag_count++;
-        }
-    }
-
     lv_obj_t* equipment_page = navigation_add_page(generator->navigation, "Equipment");
     style_page_as_grid(equipment_page);
     size_t equipment_count = data_model_equipment_count(generator->data_model);
@@ -273,11 +288,10 @@ static void rebuild_interface(ui_generator_t* generator)
     style_page_as_grid(controls_page);
     size_t writable_count = 0;
     size_t tag_count      = discovered_tag_count;
-    for (size_t tag_index = 0; tag_index < tag_count; ++tag_index) {
-        data_model_tag_t tag;
-        if (data_model_get_tag(generator->data_model, tag_index, &tag) && tag.writable) {
-            create_tag_widget(generator, controls_page, &tag, true);
-            writable_count++;
+    for (size_t equipment_index = 0; equipment_index < equipment_count; ++equipment_index) {
+        data_model_equipment_t equipment;
+        if (data_model_get_equipment(generator->data_model, equipment_index, &equipment)) {
+            writable_count += create_controls_section(generator, controls_page, &equipment);
         }
     }
     if (writable_count == 0) {
@@ -288,21 +302,313 @@ static void rebuild_interface(ui_generator_t* generator)
     }
 
     lv_obj_t* alarms_page  = navigation_add_page(generator->navigation, "Alarms");
-    lv_obj_t* alarms_label = lv_label_create(alarms_page);
-    lv_label_set_text(alarms_label, "Alarm events require OPC UA event-field discovery.\n"
-                                    "Boolean alarm variables remain visible on equipment pages.");
-    lv_obj_set_style_text_color(alarms_label, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(alarms_label, &lv_font_montserrat_20, LV_PART_MAIN);
+    style_page_as_grid(alarms_page);
+    generator->alarms_host = alarms_page;
+    rebuild_alarm_list(generator);
 
     ESP_LOGI(TAG, "Generated UI for %u equipment objects and %u tags", (unsigned)equipment_count, (unsigned)tag_count);
+}
+
+static void create_overview(ui_generator_t* generator, lv_obj_t* page)
+{
+    char count_text[16];
+    snprintf(count_text, sizeof(count_text), "%u", (unsigned)data_model_equipment_count(generator->data_model));
+    create_summary_card(page, "OBJECTS", count_text, lv_color_hex(0x2A96FF));
+    snprintf(count_text, sizeof(count_text), "%u", (unsigned)data_model_tag_count(generator->data_model));
+    create_summary_card(page, "LIVE TAGS", count_text, lv_color_hex(0x6BC1FF));
+    generator->overview_running_value = create_summary_card(page, "RUNNING", "0", lv_color_hex(0x38B000));
+    generator->overview_alarm_value = create_summary_card(page, "ACTIVE ALARMS", "0", lv_color_hex(0xE63946));
+
+    lv_obj_t* composition_title = lv_label_create(page);
+    lv_label_set_text(composition_title, "Equipment composition");
+    lv_obj_set_width(composition_title, lv_pct(100));
+    lv_obj_set_style_text_color(composition_title, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_text_font(composition_title, &lv_font_montserrat_24, LV_PART_MAIN);
+
+    size_t equipment_count = data_model_equipment_count(generator->data_model);
+    for (size_t equipment_index = 0; equipment_index < equipment_count; ++equipment_index) {
+        data_model_equipment_t equipment;
+        if (!data_model_get_equipment(generator->data_model, equipment_index, &equipment)) {
+            continue;
+        }
+        char group_name[UI_HUMAN_NAME_LENGTH];
+        copy_equipment_group_name(group_name, sizeof(group_name), &equipment);
+        bool group_already_added = false;
+        for (size_t prior_index = 0; prior_index < equipment_index; ++prior_index) {
+            data_model_equipment_t prior_equipment;
+            char prior_group_name[UI_HUMAN_NAME_LENGTH];
+            if (data_model_get_equipment(generator->data_model, prior_index, &prior_equipment)) {
+                copy_equipment_group_name(prior_group_name, sizeof(prior_group_name), &prior_equipment);
+                if (strcmp(group_name, prior_group_name) == 0) {
+                    group_already_added = true;
+                    break;
+                }
+            }
+        }
+        if (group_already_added) {
+            continue;
+        }
+
+        size_t group_count = 0;
+        for (size_t candidate_index = equipment_index; candidate_index < equipment_count; ++candidate_index) {
+            data_model_equipment_t candidate;
+            char candidate_group_name[UI_HUMAN_NAME_LENGTH];
+            if (data_model_get_equipment(generator->data_model, candidate_index, &candidate)) {
+                copy_equipment_group_name(candidate_group_name, sizeof(candidate_group_name), &candidate);
+                if (strcmp(group_name, candidate_group_name) == 0) {
+                    group_count++;
+                }
+            }
+        }
+
+        lv_obj_t* group_card = lv_obj_create(page);
+        lv_obj_set_size(group_card, 316, 76);
+        lv_obj_clear_flag(group_card, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_color(group_card, lv_color_hex(0x181818), LV_PART_MAIN);
+        lv_obj_set_style_border_color(group_card, lv_color_hex(0x444444), LV_PART_MAIN);
+        lv_obj_set_style_border_width(group_card, 1, LV_PART_MAIN);
+        lv_obj_set_style_radius(group_card, 14, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(group_card, 10, LV_PART_MAIN);
+        lv_obj_t* group_label = lv_label_create(group_card);
+        lv_label_set_text(group_label, group_name);
+        lv_label_set_long_mode(group_label, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(group_label, 228);
+        lv_obj_set_style_text_color(group_label, lv_color_hex(0xD8D8D8), LV_PART_MAIN);
+        lv_obj_set_style_text_font(group_label, &lv_font_montserrat_18, LV_PART_MAIN);
+        lv_obj_align(group_label, LV_ALIGN_LEFT_MID, 4, 0);
+
+        lv_obj_t* count_cell = lv_obj_create(group_card);
+        lv_obj_set_size(count_cell, 58, 50);
+        lv_obj_clear_flag(count_cell, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_opa(count_cell, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_border_color(count_cell, lv_color_hex(0x3A3A3A), LV_PART_MAIN);
+        lv_obj_set_style_border_width(count_cell, 1, LV_PART_MAIN);
+        lv_obj_set_style_radius(count_cell, 12, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(count_cell, 0, LV_PART_MAIN);
+        lv_obj_align(count_cell, LV_ALIGN_RIGHT_MID, 0, 0);
+        lv_obj_t* count_label = lv_label_create(count_cell);
+        char count_text[16];
+        snprintf(count_text, sizeof(count_text), "%u", (unsigned)group_count);
+        lv_label_set_text(count_label, count_text);
+        lv_obj_set_style_text_color(count_label, lv_color_hex(0xB8C2CC), LV_PART_MAIN);
+        lv_obj_set_style_text_font(count_label, &lv_font_montserrat_22, LV_PART_MAIN);
+        lv_obj_center(count_label);
+    }
+
+    lv_obj_t* status_title = lv_label_create(page);
+    lv_label_set_text(status_title, "Live equipment status");
+    lv_obj_set_width(status_title, lv_pct(100));
+    lv_obj_set_style_text_color(status_title, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_text_font(status_title, &lv_font_montserrat_24, LV_PART_MAIN);
+
+    generator->overview_equipment = calloc(equipment_count, sizeof(*generator->overview_equipment));
+    if (generator->overview_equipment == NULL && equipment_count > 0) {
+        ESP_LOGW(TAG, "Cannot allocate overview equipment bindings");
+        return;
+    }
+    for (size_t equipment_index = 0; equipment_index < equipment_count; ++equipment_index) {
+        data_model_equipment_t equipment;
+        data_model_tag_t status_tag;
+        if (!data_model_get_equipment(generator->data_model, equipment_index, &equipment) ||
+            !find_equipment_tag_by_role(generator->data_model, equipment_index, "operating_status", &status_tag)) {
+            continue;
+        }
+
+        overview_equipment_binding_t* binding =
+            &generator->overview_equipment[generator->overview_equipment_count++];
+        binding->status_tag_index = status_tag.index;
+        binding->alarm_tag_index = DATA_MODEL_INVALID_INDEX;
+        data_model_tag_t alarm_tag;
+        if (find_equipment_tag_by_role(generator->data_model, equipment_index, "alarm_status", &alarm_tag)) {
+            binding->alarm_tag_index = alarm_tag.index;
+        }
+
+        lv_obj_t* status_card = lv_obj_create(page);
+        lv_obj_set_size(status_card, 300, 88);
+        lv_obj_clear_flag(status_card, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_color(status_card, lv_color_hex(0x181818), LV_PART_MAIN);
+        lv_obj_set_style_border_color(status_card, lv_color_hex(0x444444), LV_PART_MAIN);
+        lv_obj_set_style_border_width(status_card, 1, LV_PART_MAIN);
+        lv_obj_set_style_radius(status_card, 16, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(status_card, 16, LV_PART_MAIN);
+
+        const char* equipment_name =
+            equipment.display_name[0] != '\0' ? equipment.display_name : equipment.browse_name;
+        char human_equipment_name[UI_HUMAN_NAME_LENGTH];
+        copy_humanized_name(human_equipment_name, sizeof(human_equipment_name), equipment_name);
+        lv_obj_t* equipment_label = lv_label_create(status_card);
+        lv_label_set_text(equipment_label, human_equipment_name);
+        lv_label_set_long_mode(equipment_label, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(equipment_label, 205);
+        lv_obj_set_style_text_color(equipment_label, lv_color_white(), LV_PART_MAIN);
+        lv_obj_set_style_text_font(equipment_label, &lv_font_montserrat_20, LV_PART_MAIN);
+        lv_obj_align(equipment_label, LV_ALIGN_TOP_LEFT, 0, 0);
+
+        binding->state_indicator = lv_obj_create(status_card);
+        lv_obj_remove_style_all(binding->state_indicator);
+        lv_obj_set_size(binding->state_indicator, 22, 22);
+        lv_obj_set_style_radius(binding->state_indicator, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(binding->state_indicator, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_align(binding->state_indicator, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+
+        binding->state_label = lv_label_create(status_card);
+        lv_obj_set_style_text_font(binding->state_label, &lv_font_montserrat_16, LV_PART_MAIN);
+        lv_obj_align(binding->state_label, LV_ALIGN_BOTTOM_LEFT, 34, -1);
+    }
+    update_overview(generator);
+}
+
+static lv_obj_t* create_summary_card(lv_obj_t* parent, const char* caption, const char* value, lv_color_t accent)
+{
+    lv_obj_t* card = lv_obj_create(parent);
+    lv_obj_set_size(card, 220, 108);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x181818), LV_PART_MAIN);
+    lv_obj_set_style_border_color(card, accent, LV_PART_MAIN);
+    lv_obj_set_style_border_width(card, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(card, 18, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(card, 16, LV_PART_MAIN);
+
+    lv_obj_t* caption_label = lv_label_create(card);
+    lv_label_set_text(caption_label, caption);
+    lv_obj_set_width(caption_label, lv_pct(100));
+    lv_obj_set_style_text_align(caption_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_style_text_color(caption_label, lv_color_hex(0xA0A0A0), LV_PART_MAIN);
+    lv_obj_set_style_text_font(caption_label, &lv_font_montserrat_16, LV_PART_MAIN);
+    lv_obj_align(caption_label, LV_ALIGN_TOP_MID, 0, 0);
+
+    lv_obj_t* value_label = lv_label_create(card);
+    lv_label_set_text(value_label, value);
+    lv_obj_set_width(value_label, lv_pct(100));
+    lv_obj_set_style_text_align(value_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_style_text_color(value_label, accent, LV_PART_MAIN);
+    lv_obj_set_style_text_font(value_label, &lv_font_montserrat_32, LV_PART_MAIN);
+    lv_obj_align(value_label, LV_ALIGN_BOTTOM_MID, 0, 0);
+    return value_label;
+}
+
+static void update_overview(ui_generator_t* generator)
+{
+    if (generator == NULL || generator->overview_running_value == NULL || generator->overview_alarm_value == NULL) {
+        return;
+    }
+    size_t running_count = 0;
+    size_t alarm_status_count = 0;
+    for (size_t index = 0; index < generator->overview_equipment_count; ++index) {
+        overview_equipment_binding_t* binding = &generator->overview_equipment[index];
+        data_model_tag_t status_tag;
+        bool running = data_model_get_tag(generator->data_model, binding->status_tag_index, &status_tag) &&
+                       status_tag.value_valid && status_tag.value.boolean_value;
+        bool alarm_active = false;
+        data_model_tag_t alarm_tag;
+        if (binding->alarm_tag_index != DATA_MODEL_INVALID_INDEX &&
+            data_model_get_tag(generator->data_model, binding->alarm_tag_index, &alarm_tag)) {
+            alarm_active = alarm_tag.value_valid && alarm_tag.value.boolean_value;
+        }
+        running_count += running ? 1U : 0U;
+        alarm_status_count += alarm_active ? 1U : 0U;
+
+        lv_color_t state_color = alarm_active ? lv_color_hex(0xE63946)
+                                               : (running ? lv_color_hex(0x38B000) : lv_color_hex(0x666666));
+        const char* state_text = alarm_active ? "ALARM" : (running ? "RUNNING" : "STOPPED");
+        lv_obj_set_style_bg_color(binding->state_indicator, state_color, LV_PART_MAIN);
+        lv_label_set_text(binding->state_label, state_text);
+        lv_obj_set_style_text_color(binding->state_label, state_color, LV_PART_MAIN);
+    }
+
+    size_t active_alarm_count = data_model_active_alarm_count(generator->data_model);
+    if (alarm_status_count > active_alarm_count) {
+        active_alarm_count = alarm_status_count;
+    }
+    char count_text[16];
+    snprintf(count_text, sizeof(count_text), "%u", (unsigned)running_count);
+    lv_label_set_text(generator->overview_running_value, count_text);
+    snprintf(count_text, sizeof(count_text), "%u", (unsigned)active_alarm_count);
+    lv_label_set_text(generator->overview_alarm_value, count_text);
+}
+
+static void rebuild_alarm_list(ui_generator_t* generator)
+{
+    if (generator == NULL || generator->alarms_host == NULL) {
+        return;
+    }
+    lv_obj_clean(generator->alarms_host);
+    size_t active_alarm_count = data_model_active_alarm_count(generator->data_model);
+    if (active_alarm_count == 0) {
+        lv_obj_t* empty_card = lv_obj_create(generator->alarms_host);
+        lv_obj_set_size(empty_card, lv_pct(100), 112);
+        lv_obj_set_style_bg_color(empty_card, lv_color_hex(0x122117), LV_PART_MAIN);
+        lv_obj_set_style_border_color(empty_card, lv_color_hex(0x38B000), LV_PART_MAIN);
+        lv_obj_set_style_border_width(empty_card, 2, LV_PART_MAIN);
+        lv_obj_set_style_radius(empty_card, 18, LV_PART_MAIN);
+        lv_obj_t* empty_label = lv_label_create(empty_card);
+        lv_label_set_text(empty_label, "No active alarms\nAll monitored equipment is normal");
+        lv_label_set_long_mode(empty_label, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(empty_label, lv_pct(100));
+        lv_obj_set_style_text_align(empty_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_obj_set_style_text_color(empty_label, lv_color_hex(0x7DDB91), LV_PART_MAIN);
+        lv_obj_set_style_text_font(empty_label, &lv_font_montserrat_22, LV_PART_MAIN);
+        lv_obj_center(empty_label);
+        return;
+    }
+
+    for (size_t alarm_index = 0; alarm_index < active_alarm_count; ++alarm_index) {
+        data_model_alarm_t alarm;
+        if (!data_model_get_active_alarm(generator->data_model, alarm_index, &alarm)) {
+            continue;
+        }
+        lv_color_t alarm_color = alarm.severity >= 800 ? lv_color_hex(0xE63946) : lv_color_hex(0xF0A202);
+        lv_obj_t* alarm_card = lv_obj_create(generator->alarms_host);
+        lv_obj_set_size(alarm_card, lv_pct(100), 132);
+        lv_obj_clear_flag(alarm_card, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_color(alarm_card, lv_color_hex(0x211315), LV_PART_MAIN);
+        lv_obj_set_style_border_color(alarm_card, alarm_color, LV_PART_MAIN);
+        lv_obj_set_style_border_width(alarm_card, 2, LV_PART_MAIN);
+        lv_obj_set_style_radius(alarm_card, 18, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(alarm_card, 18, LV_PART_MAIN);
+
+        lv_obj_t* indicator = lv_obj_create(alarm_card);
+        lv_obj_remove_style_all(indicator);
+        lv_obj_set_size(indicator, 24, 24);
+        lv_obj_set_style_radius(indicator, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(indicator, alarm_color, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(indicator, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_align(indicator, LV_ALIGN_TOP_LEFT, 0, 2);
+
+        lv_obj_t* source_label = lv_label_create(alarm_card);
+        char human_source_name[UI_HUMAN_NAME_LENGTH];
+        copy_humanized_name(human_source_name, sizeof(human_source_name), alarm.source_name);
+        lv_label_set_text(source_label, human_source_name);
+        lv_obj_set_style_text_color(source_label, lv_color_white(), LV_PART_MAIN);
+        lv_obj_set_style_text_font(source_label, &lv_font_montserrat_22, LV_PART_MAIN);
+        lv_obj_align(source_label, LV_ALIGN_TOP_LEFT, 38, 0);
+
+        lv_obj_t* reason_label = lv_label_create(alarm_card);
+        lv_label_set_text(reason_label, alarm.reason);
+        lv_label_set_long_mode(reason_label, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(reason_label, lv_pct(100));
+        lv_obj_set_style_text_color(reason_label, lv_color_hex(0xE0E0E0), LV_PART_MAIN);
+        lv_obj_set_style_text_font(reason_label, &lv_font_montserrat_18, LV_PART_MAIN);
+        lv_obj_align(reason_label, LV_ALIGN_TOP_LEFT, 0, 40);
+
+        char details[80];
+        snprintf(details, sizeof(details), "%.47s  |  Severity %u", alarm.alarm_code, (unsigned)alarm.severity);
+        lv_obj_t* details_label = lv_label_create(alarm_card);
+        lv_label_set_text(details_label, details);
+        lv_obj_set_style_text_color(details_label, alarm_color, LV_PART_MAIN);
+        lv_obj_set_style_text_font(details_label, &lv_font_montserrat_14, LV_PART_MAIN);
+        lv_obj_align(details_label, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    }
 }
 
 static void create_equipment_section(ui_generator_t* generator, lv_obj_t* page,
                                      const data_model_equipment_t* equipment)
 {
     const char* equipment_name = equipment->display_name[0] != '\0' ? equipment->display_name : equipment->browse_name;
+    char human_equipment_name[UI_HUMAN_NAME_LENGTH];
+    copy_humanized_name(human_equipment_name, sizeof(human_equipment_name), equipment_name);
     lv_obj_t* section_title    = lv_label_create(page);
-    lv_label_set_text(section_title, equipment_name);
+    lv_label_set_text(section_title, human_equipment_name);
     lv_obj_set_width(section_title, lv_pct(100));
     lv_obj_set_style_text_color(section_title, lv_color_hex(0x6BC1FF), LV_PART_MAIN);
     lv_obj_set_style_text_font(section_title, &lv_font_montserrat_24, LV_PART_MAIN);
@@ -314,7 +620,7 @@ static void create_equipment_section(ui_generator_t* generator, lv_obj_t* page,
     for (size_t tag_index = 0; tag_index < tag_count; ++tag_index) {
         data_model_tag_t tag;
         if (data_model_get_tag(generator->data_model, tag_index, &tag) && tag.equipment_index == equipment->index) {
-            create_tag_widget(generator, page, &tag, false);
+            create_tag_widget(generator, page, &tag);
             matching_tags++;
         }
     }
@@ -327,8 +633,45 @@ static void create_equipment_section(ui_generator_t* generator, lv_obj_t* page,
     }
 }
 
-static void create_tag_widget(ui_generator_t* generator, lv_obj_t* parent, const data_model_tag_t* tag,
-                              bool include_equipment_name)
+static size_t create_controls_section(ui_generator_t* generator, lv_obj_t* page,
+                                      const data_model_equipment_t* equipment)
+{
+    size_t tag_count = data_model_tag_count(generator->data_model);
+    size_t writable_count = 0;
+    for (size_t tag_index = 0; tag_index < tag_count; ++tag_index) {
+        data_model_tag_t tag;
+        if (data_model_get_tag(generator->data_model, tag_index, &tag) && tag.writable &&
+            tag.equipment_index == equipment->index) {
+            writable_count++;
+        }
+    }
+    if (writable_count == 0) {
+        return 0;
+    }
+
+    const char* equipment_name =
+        equipment->display_name[0] != '\0' ? equipment->display_name : equipment->browse_name;
+    char human_equipment_name[UI_HUMAN_NAME_LENGTH];
+    copy_humanized_name(human_equipment_name, sizeof(human_equipment_name), equipment_name);
+    lv_obj_t* section_title = lv_label_create(page);
+    lv_label_set_text(section_title, human_equipment_name);
+    lv_obj_set_width(section_title, lv_pct(100));
+    lv_obj_set_style_text_color(section_title, lv_color_hex(0x6BC1FF), LV_PART_MAIN);
+    lv_obj_set_style_text_font(section_title, &lv_font_montserrat_24, LV_PART_MAIN);
+    lv_obj_set_style_pad_top(section_title, 10, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(section_title, 2, LV_PART_MAIN);
+
+    for (size_t tag_index = 0; tag_index < tag_count; ++tag_index) {
+        data_model_tag_t tag;
+        if (data_model_get_tag(generator->data_model, tag_index, &tag) && tag.writable &&
+            tag.equipment_index == equipment->index) {
+            create_tag_widget(generator, page, &tag);
+        }
+    }
+    return writable_count;
+}
+
+static void create_tag_widget(ui_generator_t* generator, lv_obj_t* parent, const data_model_tag_t* tag)
 {
     generated_widget_binding_t* binding = allocate_binding(generator);
     if (binding == NULL) {
@@ -350,17 +693,9 @@ static void create_tag_widget(ui_generator_t* generator, lv_obj_t* parent, const
 
     lv_obj_t* name_label = lv_label_create(card);
     const char* tag_name = tag->display_name[0] != '\0' ? tag->display_name : tag->browse_name;
-    char widget_title[(DATA_MODEL_NAME_LENGTH * 2) + 4];
-    data_model_equipment_t equipment;
-    if (include_equipment_name &&
-        data_model_get_equipment(generator->data_model, tag->equipment_index, &equipment)) {
-        const char* equipment_name =
-            equipment.display_name[0] != '\0' ? equipment.display_name : equipment.browse_name;
-        snprintf(widget_title, sizeof(widget_title), "%.63s / %.63s", equipment_name, tag_name);
-        lv_label_set_text(name_label, widget_title);
-    } else {
-        lv_label_set_text(name_label, tag_name);
-    }
+    char human_tag_name[UI_HUMAN_NAME_LENGTH];
+    copy_humanized_name(human_tag_name, sizeof(human_tag_name), tag_name);
+    lv_label_set_text(name_label, human_tag_name);
     lv_label_set_long_mode(name_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(name_label, lv_pct(100));
     lv_obj_set_style_text_color(name_label, lv_color_white(), LV_PART_MAIN);
@@ -378,8 +713,13 @@ static void create_tag_widget(ui_generator_t* generator, lv_obj_t* parent, const
             binding->widget_type   = GENERATED_WIDGET_BOOLEAN_SWITCH;
             binding->visual_object = lv_switch_create(card);
             lv_obj_set_size(binding->visual_object, 68, 38);
+            lv_obj_set_style_bg_color(binding->visual_object, lv_color_hex(0x242424), LV_PART_MAIN);
+            lv_obj_set_style_bg_opa(binding->visual_object, LV_OPA_COVER, LV_PART_MAIN);
+            lv_obj_set_style_border_color(binding->visual_object, lv_color_hex(0x444444), LV_PART_MAIN);
+            lv_obj_set_style_border_width(binding->visual_object, 1, LV_PART_MAIN);
             lv_obj_set_style_bg_color(binding->visual_object, lv_color_hex(0x2A96FF),
                                       LV_PART_INDICATOR | LV_STATE_CHECKED);
+            lv_obj_set_style_bg_color(binding->visual_object, lv_color_hex(0xE8E8E8), LV_PART_KNOB);
             lv_obj_align(binding->visual_object, LV_ALIGN_BOTTOM_RIGHT, 0, 2);
             lv_obj_add_event_cb(binding->visual_object, boolean_switch_event, LV_EVENT_VALUE_CHANGED, binding);
         } else {
@@ -432,9 +772,17 @@ static void update_widget(generated_widget_binding_t* binding, const data_model_
     }
 
     switch (tag->data_type) {
-    case DATA_MODEL_TYPE_BOOLEAN:
+    case DATA_MODEL_TYPE_BOOLEAN: {
+        bool displayed_value = tag->value.boolean_value;
+        if (strcmp(tag->semantic_role, "operating_command") == 0) {
+            data_model_tag_t operating_status;
+            if (find_equipment_tag_by_role(binding->generator->data_model, tag->equipment_index,
+                                           "operating_status", &operating_status) && operating_status.value_valid) {
+                displayed_value = operating_status.value.boolean_value;
+            }
+        }
         if (binding->boolean_write_pending) {
-            if (tag->value.boolean_value == binding->pending_boolean_value) {
+            if (displayed_value == binding->pending_boolean_value) {
                 binding->boolean_write_pending = false;
             } else if (lv_tick_elaps(binding->pending_write_started) < UI_BOOLEAN_WRITE_HOLD_MS) {
                 binding->updating_from_model = false;
@@ -443,19 +791,20 @@ static void update_widget(generated_widget_binding_t* binding, const data_model_
                 binding->boolean_write_pending = false;
             }
         }
-        lv_label_set_text(binding->value_label, tag->value.boolean_value ? "ON" : "OFF");
+        lv_label_set_text(binding->value_label, displayed_value ? "ON" : "OFF");
         if (binding->widget_type == GENERATED_WIDGET_BOOLEAN_INDICATOR) {
             lv_obj_set_style_bg_color(binding->visual_object,
-                                      tag->value.boolean_value ? lv_color_hex(0x38B000) : lv_color_hex(0xE63946),
+                                      displayed_value ? lv_color_hex(0x38B000) : lv_color_hex(0xE63946),
                                       LV_PART_MAIN);
         } else if (binding->widget_type == GENERATED_WIDGET_BOOLEAN_SWITCH) {
-            if (tag->value.boolean_value) {
+            if (displayed_value) {
                 lv_obj_add_state(binding->visual_object, LV_STATE_CHECKED);
             } else {
                 lv_obj_clear_state(binding->visual_object, LV_STATE_CHECKED);
             }
         }
         break;
+    }
     case DATA_MODEL_TYPE_INTEGER:
         {
             char value_text[64];
@@ -505,6 +854,22 @@ static void boolean_switch_event(lv_event_t* event)
         return;
     }
     bool value       = lv_obj_has_state(binding->visual_object, LV_STATE_CHECKED);
+    data_model_tag_t command_tag;
+    if (data_model_get_tag(binding->generator->data_model, binding->tag_index, &command_tag) &&
+        strcmp(command_tag.semantic_role, "operating_command") == 0) {
+        data_model_tag_t automatic_mode;
+        if (find_equipment_tag_by_role(binding->generator->data_model, command_tag.equipment_index,
+                                       "automatic_mode", &automatic_mode) && automatic_mode.value_valid &&
+            automatic_mode.value.boolean_value) {
+            esp_err_t mode_result =
+                opcua_client_write_boolean(binding->generator->opcua_client, automatic_mode.index, false);
+            if (mode_result != ESP_OK) {
+                ESP_LOGE(TAG, "Cannot switch equipment to manual mode: %s", esp_err_to_name(mode_result));
+                update_widget(binding, &command_tag);
+                return;
+            }
+        }
+    }
     esp_err_t result = opcua_client_write_boolean(binding->generator->opcua_client, binding->tag_index, value);
     if (result != ESP_OK) {
         ESP_LOGE(TAG, "Cannot queue Boolean write: %s", esp_err_to_name(result));
@@ -809,4 +1174,99 @@ static void copy_display_unit(char* destination, size_t destination_size, const 
         destination[destination_index++] = source[source_index++];
     }
     destination[destination_index] = '\0';
+}
+
+static bool find_equipment_tag_by_role(const data_model_t* model, size_t equipment_index, const char* semantic_role,
+                                       data_model_tag_t* tag_out)
+{
+    if (model == NULL || semantic_role == NULL || tag_out == NULL) {
+        return false;
+    }
+    size_t tag_count = data_model_tag_count(model);
+    for (size_t tag_index = 0; tag_index < tag_count; ++tag_index) {
+        data_model_tag_t tag;
+        if (data_model_get_tag(model, tag_index, &tag) && tag.equipment_index == equipment_index &&
+            strcmp(tag.semantic_role, semantic_role) == 0) {
+            *tag_out = tag;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void copy_equipment_group_name(char* destination, size_t destination_size,
+                                      const data_model_equipment_t* equipment)
+{
+    if (destination == NULL || destination_size == 0 || equipment == NULL) {
+        return;
+    }
+    const char* source = equipment->display_name[0] != '\0' ? equipment->display_name : equipment->browse_name;
+    copy_humanized_name(destination, destination_size, source);
+    size_t destination_length = strnlen(destination, destination_size - 1);
+    while (destination_length > 0 && destination[destination_length - 1] >= '0' &&
+           destination[destination_length - 1] <= '9') {
+        destination_length--;
+    }
+    while (destination_length > 0 && destination[destination_length - 1] == ' ') {
+        destination_length--;
+    }
+    if (destination_length > 0) {
+        destination[destination_length] = '\0';
+    } else {
+        copy_humanized_name(destination, destination_size, source);
+    }
+}
+
+/** Make OPC UA BrowseNames readable without changing the discovered Data Model. */
+static void copy_humanized_name(char* destination, size_t destination_size, const char* source)
+{
+    if (destination == NULL || destination_size == 0) {
+        return;
+    }
+    destination[0] = '\0';
+    if (source == NULL) {
+        return;
+    }
+
+    size_t source_index = 0;
+    size_t destination_index = 0;
+    unsigned char previous = 0;
+    while (source[source_index] != '\0' && destination_index + 1 < destination_size) {
+        unsigned char current = (unsigned char)source[source_index];
+        unsigned char next = (unsigned char)source[source_index + 1];
+        bool current_is_upper = current >= 'A' && current <= 'Z';
+        bool current_is_lower = current >= 'a' && current <= 'z';
+        bool current_is_digit = current >= '0' && current <= '9';
+        bool previous_is_upper = previous >= 'A' && previous <= 'Z';
+        bool previous_is_lower = previous >= 'a' && previous <= 'z';
+        bool previous_is_digit = previous >= '0' && previous <= '9';
+        bool next_is_lower = next >= 'a' && next <= 'z';
+
+        if (current == '_' || current == '-') {
+            if (destination_index > 0 && destination[destination_index - 1] != ' ') {
+                destination[destination_index++] = ' ';
+            }
+            previous = current;
+            source_index++;
+            continue;
+        }
+
+        bool needs_separator = destination_index > 0 && destination[destination_index - 1] != ' ' &&
+                               ((current_is_upper && (previous_is_lower || (previous_is_upper && next_is_lower))) ||
+                                (current_is_digit && (previous_is_lower || previous_is_upper)) ||
+                                ((current_is_lower || current_is_upper) && previous_is_digit));
+        if (needs_separator && destination_index + 1 < destination_size) {
+            destination[destination_index++] = ' ';
+        }
+        destination[destination_index++] = (char)current;
+        previous = current;
+        source_index++;
+    }
+    while (destination_index > 0 && destination[destination_index - 1] == ' ') {
+        destination_index--;
+    }
+    destination[destination_index] = '\0';
+    if (destination[0] >= 'a' && destination[0] <= 'z') {
+        destination[0] = (char)(destination[0] - ('a' - 'A'));
+    }
 }

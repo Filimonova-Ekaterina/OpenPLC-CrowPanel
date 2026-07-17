@@ -45,6 +45,7 @@ class OpcUaIntegrationTests(unittest.IsolatedAsyncioTestCase):
         async with Client(url=self.endpoint_url) as client:
             temperature_node = client.get_node(server_nodes.temperature.nodeid)
             run_command_node = client.get_node(server_nodes.run_command.nodeid)
+            automatic_mode_node = client.get_node(server_nodes.automatic_mode.nodeid)
             run_status_node = client.get_node(server_nodes.run_status.nodeid)
 
             self.assertEqual(
@@ -70,10 +71,17 @@ class OpcUaIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 & (1 << int(ua.AccessLevel.CurrentWrite))
             )
 
-            await run_command_node.write_value(True)
+            await automatic_mode_node.write_value(False)
+            await run_command_node.write_value(False)
             await self.opcua_server.read_commands(self.station)
             self.station.update(0.1)
             self.fault_manager.evaluate(self.station, 0.1)
+            await self.opcua_server.publish(self.station, self.fault_manager)
+            self.assertFalse(await run_status_node.read_value())
+
+            await run_command_node.write_value(True)
+            await self.opcua_server.read_commands(self.station)
+            self.station.update(0.1)
             await self.opcua_server.publish(self.station, self.fault_manager)
             self.assertTrue(await run_status_node.read_value())
 

@@ -27,6 +27,7 @@ class CompressorNodes:
     runtime: Node
     run_status: Node
     run_command: Node
+    automatic_mode: Node
     alarm_status: Node
     sensor_fault_command: Node
 
@@ -123,6 +124,9 @@ class OpcUaStationServer:
             run_command=await self._add_boolean_variable(
                 object_node, commands["run_command"], writable=True
             ),
+            automatic_mode=await self._add_boolean_variable(
+                object_node, commands["automatic_mode"], writable=True
+            ),
             alarm_status=await self._add_boolean_variable(object_node, signals["alarm_status"]),
             sensor_fault_command=await self._add_boolean_variable(
                 object_node, commands["sensor_fault_command"], writable=True
@@ -196,6 +200,12 @@ class OpcUaStationServer:
                 "EngineeringUnit",
                 str(configuration["engineering_unit"]),
             )
+        if "semantic_role" in configuration:
+            await node.add_property(
+                self.namespace_index,
+                "SemanticRole",
+                str(configuration["semantic_role"]),
+            )
         if "minimum" in configuration:
             await node.add_property(
                 self.namespace_index,
@@ -226,6 +236,7 @@ class OpcUaStationServer:
 
         for compressor in station.compressors:
             nodes = self.compressor_nodes[compressor.identifier]
+            compressor.automatic_mode = bool(await nodes.automatic_mode.read_value())
             compressor.manual_run_command = bool(await nodes.run_command.read_value())
             compressor.sensor_fault_command = bool(
                 await nodes.sensor_fault_command.read_value()
@@ -249,6 +260,10 @@ class OpcUaStationServer:
             await nodes.run_status.write_value(
                 ua.Variant(compressor.state.is_running, ua.VariantType.Boolean)
             )
+            if compressor.automatic_mode:
+                await nodes.run_command.write_value(
+                    ua.Variant(compressor.state.is_running, ua.VariantType.Boolean)
+                )
             await nodes.alarm_status.write_value(
                 ua.Variant(compressor.state.alarm_active, ua.VariantType.Boolean)
             )

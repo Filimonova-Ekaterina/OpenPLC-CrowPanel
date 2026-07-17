@@ -10,12 +10,15 @@ struct data_model
 {
     data_model_equipment_t* equipment;
     data_model_tag_t* tags;
+    data_model_alarm_t alarms[DATA_MODEL_MAX_ALARMS];
     size_t equipment_capacity;
     size_t tag_capacity;
     size_t equipment_count;
     size_t tag_count;
+    size_t alarm_count;
     uint32_t structure_generation;
     uint32_t value_generation;
+    uint32_t alarm_generation;
     bool structure_update_active;
     bool structure_dirty;
     SemaphoreHandle_t mutex;
@@ -88,8 +91,11 @@ void data_model_clear(data_model_t* model)
     memset(model->tags, 0, model->tag_capacity * sizeof(*model->tags));
     model->equipment_count = 0;
     model->tag_count       = 0;
+    memset(model->alarms, 0, sizeof(model->alarms));
+    model->alarm_count = 0;
     mark_structure_changed(model);
     model->value_generation++;
+    model->alarm_generation++;
     model_unlock(model);
 }
 
@@ -202,6 +208,85 @@ bool data_model_get_tag(const data_model_t* model, size_t tag_index, data_model_
     return found;
 }
 
+esp_err_t data_model_update_alarm(data_model_t* model, const data_model_alarm_t* alarm)
+{
+    if (alarm == NULL || alarm->source_name[0] == '\0' || alarm->alarm_code[0] == '\0' || !model_lock(model)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    size_t alarm_index = DATA_MODEL_INVALID_INDEX;
+    for (size_t index = 0; index < model->alarm_count; ++index) {
+        if (strcmp(model->alarms[index].source_name, alarm->source_name) == 0 &&
+            strcmp(model->alarms[index].alarm_code, alarm->alarm_code) == 0) {
+            alarm_index = index;
+            break;
+        }
+    }
+    if (alarm_index == DATA_MODEL_INVALID_INDEX) {
+        if (!alarm->active) {
+            model_unlock(model);
+            return ESP_OK;
+        }
+        if (model->alarm_count >= DATA_MODEL_MAX_ALARMS) {
+            model_unlock(model);
+            return ESP_ERR_NO_MEM;
+        }
+        alarm_index = model->alarm_count++;
+    }
+
+    model->alarms[alarm_index] = *alarm;
+    model->alarm_generation++;
+    model_unlock(model);
+    return ESP_OK;
+}
+
+void data_model_clear_alarms(data_model_t* model)
+{
+    if (!model_lock(model)) {
+        return;
+    }
+    memset(model->alarms, 0, sizeof(model->alarms));
+    model->alarm_count = 0;
+    model->alarm_generation++;
+    model_unlock(model);
+}
+
+bool data_model_get_active_alarm(const data_model_t* model, size_t active_index, data_model_alarm_t* alarm_out)
+{
+    if (alarm_out == NULL || !model_lock(model)) {
+        return false;
+    }
+    size_t current_active_index = 0;
+    bool found = false;
+    for (size_t index = 0; index < model->alarm_count; ++index) {
+        if (!model->alarms[index].active) {
+            continue;
+        }
+        if (current_active_index++ == active_index) {
+            *alarm_out = model->alarms[index];
+            found = true;
+            break;
+        }
+    }
+    model_unlock(model);
+    return found;
+}
+
+size_t data_model_active_alarm_count(const data_model_t* model)
+{
+    if (!model_lock(model)) {
+        return 0;
+    }
+    size_t active_count = 0;
+    for (size_t index = 0; index < model->alarm_count; ++index) {
+        if (model->alarms[index].active) {
+            active_count++;
+        }
+    }
+    model_unlock(model);
+    return active_count;
+}
+
 size_t data_model_equipment_count(const data_model_t* model)
 {
     if (! model_lock(model)) {
@@ -238,6 +323,16 @@ uint32_t data_model_value_generation(const data_model_t* model)
         return 0;
     }
     uint32_t generation = model->value_generation;
+    model_unlock(model);
+    return generation;
+}
+
+uint32_t data_model_alarm_generation(const data_model_t* model)
+{
+    if (!model_lock(model)) {
+        return 0;
+    }
+    uint32_t generation = model->alarm_generation;
     model_unlock(model);
     return generation;
 }
