@@ -9,6 +9,7 @@
 #include "navigation.h"
 #include "openplc_settings.h"
 #include "system_settings.h"
+#include "trends.h"
 #include "wifi_widget.h"
 #include "wifi_menu.h"
 
@@ -18,6 +19,21 @@
 #define UI_HUMAN_NAME_LENGTH  128
 #define UI_BOOLEAN_WRITE_HOLD_MS 2000
 #define SETTINGS_SECTION_COUNT 3
+
+#define UI_COLOR_BACKGROUND       0x080808
+#define UI_COLOR_SURFACE          0x151515
+#define UI_COLOR_SURFACE_RAISED   0x1B1B1B
+#define UI_COLOR_BORDER           0x303030
+#define UI_COLOR_CONTROL_BORDER   0x484848
+#define UI_COLOR_TEXT_PRIMARY     0xF4F4F4
+#define UI_COLOR_TEXT_LABEL       0xD0D0D0
+#define UI_COLOR_TEXT_SECONDARY   0xA0A0A0
+#define UI_COLOR_ACCENT           0x2A96FF
+#define UI_COLOR_ACCENT_SOFT      0x6BC1FF
+#define UI_COLOR_SUCCESS          0x38B000
+#define UI_COLOR_WARNING          0xF0A202
+#define UI_COLOR_DANGER           0xE63946
+#define UI_COLOR_INACTIVE         0x666666
 
 enum
 {
@@ -52,8 +68,12 @@ typedef struct
 {
     size_t status_tag_index;
     size_t alarm_tag_index;
+    lv_obj_t* state_beacon;
     lv_obj_t* state_indicator;
     lv_obj_t* state_label;
+    bool displayed_state_valid;
+    bool displayed_running;
+    bool displayed_alarm;
 } overview_equipment_binding_t;
 
 struct ui_generator
@@ -78,10 +98,16 @@ struct ui_generator
     size_t overview_equipment_count;
     lv_obj_t* overview_running_value;
     lv_obj_t* overview_alarm_value;
+    lv_obj_t* overview_state_value;
+    lv_obj_t* overview_state_detail;
+    lv_obj_t* overview_state_indicator;
     lv_obj_t* alarms_host;
     uint32_t observed_structure_generation;
     uint32_t observed_value_generation;
     uint32_t observed_alarm_generation;
+    bool status_display_valid;
+    opcua_client_state_t displayed_client_state;
+    char displayed_status_text[128];
 };
 
 static const char* TAG = "ui_generator";
@@ -116,6 +142,12 @@ static void copy_display_unit(char* destination, size_t destination_size, const 
 static bool find_equipment_tag_by_role(const data_model_t* model, size_t equipment_index, const char* semantic_role,
                                        data_model_tag_t* tag_out);
 static lv_obj_t* create_summary_card(lv_obj_t* parent, const char* caption, const char* value, lv_color_t accent);
+static void create_section_heading(lv_obj_t* parent, const char* title, const char* detail);
+static void create_empty_state(lv_obj_t* parent, const char* title, const char* detail, lv_color_t accent);
+static void create_alarm_clear_state(lv_obj_t* parent);
+static void style_content_card(lv_obj_t* card, lv_color_t background, lv_coord_t radius);
+static lv_color_t boolean_state_color(const data_model_tag_t* tag, bool value);
+static void set_label_text_if_changed(lv_obj_t* label, const char* text);
 static void copy_equipment_group_name(char* destination, size_t destination_size,
                                       const data_model_equipment_t* equipment);
 static void copy_humanized_name(char* destination, size_t destination_size, const char* source);
@@ -138,7 +170,7 @@ esp_err_t ui_generator_create(lv_obj_t* parent, data_model_t* data_model, opcua_
     lv_obj_remove_style_all(generator->root);
     lv_obj_set_size(generator->root, lv_pct(100), lv_pct(100));
     lv_obj_set_flex_flow(generator->root, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_bg_color(generator->root, lv_color_hex(0x080808), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(generator->root, lv_color_hex(UI_COLOR_BACKGROUND), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(generator->root, LV_OPA_COVER, LV_PART_MAIN);
 
     lv_obj_t* status_bar = lv_obj_create(generator->root);
@@ -211,15 +243,22 @@ static void refresh_timer_callback(lv_timer_t* timer)
 
     char status_text[128];
     opcua_client_get_status(generator->opcua_client, status_text, sizeof(status_text));
-    lv_label_set_text(generator->status_label, status_text);
-    opcua_client_state_t state = opcua_client_get_state(generator->opcua_client);
-    lv_color_t status_color    = lv_color_hex(0xF0A202);
-    if (state == OPCUA_CLIENT_CONNECTED) {
-        status_color = lv_color_hex(0x38B000);
-    } else if (state == OPCUA_CLIENT_CONNECTION_ERROR || state == OPCUA_CLIENT_BROWSE_ERROR) {
-        status_color = lv_color_hex(0xE63946);
+    if (strcmp(generator->displayed_status_text, status_text) != 0) {
+        lv_label_set_text(generator->status_label, status_text);
+        snprintf(generator->displayed_status_text, sizeof(generator->displayed_status_text), "%s", status_text);
     }
-    lv_obj_set_style_bg_color(generator->status_indicator, status_color, LV_PART_MAIN);
+    opcua_client_state_t state = opcua_client_get_state(generator->opcua_client);
+    if (! generator->status_display_valid || state != generator->displayed_client_state) {
+        lv_color_t status_color = lv_color_hex(0xF0A202);
+        if (state == OPCUA_CLIENT_CONNECTED) {
+            status_color = lv_color_hex(0x38B000);
+        } else if (state == OPCUA_CLIENT_CONNECTION_ERROR || state == OPCUA_CLIENT_BROWSE_ERROR) {
+            status_color = lv_color_hex(0xE63946);
+        }
+        lv_obj_set_style_bg_color(generator->status_indicator, status_color, LV_PART_MAIN);
+        generator->displayed_client_state = state;
+        generator->status_display_valid = true;
+    }
 
     uint32_t alarm_generation = data_model_alarm_generation(generator->data_model);
     if (alarm_generation != generator->observed_alarm_generation) {
@@ -258,6 +297,9 @@ static void rebuild_interface(ui_generator_t* generator)
     generator->overview_equipment_count = 0;
     generator->overview_running_value = NULL;
     generator->overview_alarm_value = NULL;
+    generator->overview_state_value = NULL;
+    generator->overview_state_detail = NULL;
+    generator->overview_state_indicator = NULL;
     generator->alarms_host = NULL;
 
     navigation_release(generator->navigation);
@@ -284,6 +326,14 @@ static void rebuild_interface(ui_generator_t* generator)
         }
     }
 
+    lv_obj_t* trends_page = navigation_add_page(generator->navigation, "Trends");
+    style_page_as_grid(trends_page);
+    if (trends_create(trends_page, generator->data_model) == NULL) {
+        create_section_heading(trends_page, "Live trends", "History unavailable");
+        create_empty_state(trends_page, "Cannot create trend charts",
+                           "Not enough memory for the Trends view", lv_color_hex(UI_COLOR_WARNING));
+    }
+
     lv_obj_t* controls_page = navigation_add_page(generator->navigation, "Controls");
     style_page_as_grid(controls_page);
     size_t writable_count = 0;
@@ -295,10 +345,10 @@ static void rebuild_interface(ui_generator_t* generator)
         }
     }
     if (writable_count == 0) {
-        lv_obj_t* empty_label = lv_label_create(controls_page);
-        lv_label_set_text(empty_label, "No writable OPC UA variables discovered");
-        lv_obj_set_style_text_color(empty_label, lv_color_hex(0xA0A0A0), LV_PART_MAIN);
-        lv_obj_set_style_text_font(empty_label, &lv_font_montserrat_20, LV_PART_MAIN);
+        create_section_heading(controls_page, "Controls", "OPC UA write access");
+        create_empty_state(controls_page, "No writable variables",
+                           "Controls appear automatically when write access is discovered",
+                           lv_color_hex(UI_COLOR_ACCENT));
     }
 
     lv_obj_t* alarms_page  = navigation_add_page(generator->navigation, "Alarms");
@@ -311,21 +361,61 @@ static void rebuild_interface(ui_generator_t* generator)
 
 static void create_overview(ui_generator_t* generator, lv_obj_t* page)
 {
-    char count_text[16];
-    snprintf(count_text, sizeof(count_text), "%u", (unsigned)data_model_equipment_count(generator->data_model));
-    create_summary_card(page, "OBJECTS", count_text, lv_color_hex(0x2A96FF));
-    snprintf(count_text, sizeof(count_text), "%u", (unsigned)data_model_tag_count(generator->data_model));
-    create_summary_card(page, "LIVE TAGS", count_text, lv_color_hex(0x6BC1FF));
-    generator->overview_running_value = create_summary_card(page, "RUNNING", "0", lv_color_hex(0x38B000));
-    generator->overview_alarm_value = create_summary_card(page, "ACTIVE ALARMS", "0", lv_color_hex(0xE63946));
-
-    lv_obj_t* composition_title = lv_label_create(page);
-    lv_label_set_text(composition_title, "Equipment composition");
-    lv_obj_set_width(composition_title, lv_pct(100));
-    lv_obj_set_style_text_color(composition_title, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(composition_title, &lv_font_montserrat_24, LV_PART_MAIN);
-
     size_t equipment_count = data_model_equipment_count(generator->data_model);
+    size_t tag_count = data_model_tag_count(generator->data_model);
+
+    /* The command-center row establishes a clear reading order: overall state
+     * first, then the two operational counts that need regular attention. */
+    lv_obj_t* command_row = lv_obj_create(page);
+    lv_obj_remove_style_all(command_row);
+    lv_obj_set_size(command_row, lv_pct(97), 126);
+    lv_obj_set_flex_flow(command_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(command_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(command_row, 16, LV_PART_MAIN);
+    lv_obj_clear_flag(command_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* state_card = lv_obj_create(command_row);
+    style_content_card(state_card, lv_color_hex(UI_COLOR_SURFACE_RAISED), 20);
+    lv_obj_set_height(state_card, lv_pct(100));
+    lv_obj_set_flex_grow(state_card, 1);
+    lv_obj_set_style_pad_left(state_card, 24, LV_PART_MAIN);
+
+    lv_obj_t* eyebrow = lv_label_create(state_card);
+    lv_label_set_text(eyebrow, "SYSTEM OVERVIEW");
+    lv_obj_set_style_text_color(eyebrow, lv_color_hex(UI_COLOR_ACCENT_SOFT), LV_PART_MAIN);
+    lv_obj_set_style_text_font(eyebrow, &lv_font_montserrat_16, LV_PART_MAIN);
+    lv_obj_align(eyebrow, LV_ALIGN_TOP_LEFT, 34, 0);
+
+    generator->overview_state_indicator = lv_obj_create(state_card);
+    lv_obj_remove_style_all(generator->overview_state_indicator);
+    lv_obj_set_size(generator->overview_state_indicator, 18, 18);
+    lv_obj_set_style_radius(generator->overview_state_indicator, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(generator->overview_state_indicator, lv_color_hex(UI_COLOR_INACTIVE), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(generator->overview_state_indicator, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_align(generator->overview_state_indicator, LV_ALIGN_TOP_LEFT, 0, 1);
+
+    generator->overview_state_value = lv_label_create(state_card);
+    lv_label_set_text(generator->overview_state_value, "Discovering equipment");
+    lv_obj_set_width(generator->overview_state_value, lv_pct(100));
+    lv_label_set_long_mode(generator->overview_state_value, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(generator->overview_state_value, lv_color_hex(UI_COLOR_TEXT_PRIMARY), LV_PART_MAIN);
+    lv_obj_set_style_text_font(generator->overview_state_value, &lv_font_montserrat_34, LV_PART_MAIN);
+    lv_obj_align(generator->overview_state_value, LV_ALIGN_LEFT_MID, 0, 2);
+
+    generator->overview_state_detail = lv_label_create(state_card);
+    lv_label_set_text_fmt(generator->overview_state_detail, "%u objects  |  %u live tags",
+                          (unsigned)equipment_count, (unsigned)tag_count);
+    lv_obj_set_style_text_color(generator->overview_state_detail, lv_color_hex(UI_COLOR_TEXT_SECONDARY),
+                                LV_PART_MAIN);
+    lv_obj_set_style_text_font(generator->overview_state_detail, &lv_font_montserrat_16, LV_PART_MAIN);
+    lv_obj_align(generator->overview_state_detail, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+
+    generator->overview_running_value =
+        create_summary_card(command_row, "RUNNING", "0", lv_color_hex(UI_COLOR_ACCENT));
+    generator->overview_alarm_value =
+        create_summary_card(command_row, "ACTIVE ALARMS", "0", lv_color_hex(UI_COLOR_DANGER));
+
+    create_section_heading(page, "Equipment composition", "Discovered from OPC UA");
     for (size_t equipment_index = 0; equipment_index < equipment_count; ++equipment_index) {
         data_model_equipment_t equipment;
         if (!data_model_get_equipment(generator->data_model, equipment_index, &equipment)) {
@@ -362,44 +452,38 @@ static void create_overview(ui_generator_t* generator, lv_obj_t* page)
         }
 
         lv_obj_t* group_card = lv_obj_create(page);
-        lv_obj_set_size(group_card, 316, 76);
+        lv_obj_remove_style_all(group_card);
+        lv_obj_set_size(group_card, 310, 70);
         lv_obj_clear_flag(group_card, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_bg_color(group_card, lv_color_hex(0x181818), LV_PART_MAIN);
-        lv_obj_set_style_border_color(group_card, lv_color_hex(0x444444), LV_PART_MAIN);
-        lv_obj_set_style_border_width(group_card, 1, LV_PART_MAIN);
-        lv_obj_set_style_radius(group_card, 14, LV_PART_MAIN);
-        lv_obj_set_style_pad_all(group_card, 10, LV_PART_MAIN);
+
         lv_obj_t* group_label = lv_label_create(group_card);
         lv_label_set_text(group_label, group_name);
         lv_label_set_long_mode(group_label, LV_LABEL_LONG_DOT);
-        lv_obj_set_width(group_label, 228);
-        lv_obj_set_style_text_color(group_label, lv_color_hex(0xD8D8D8), LV_PART_MAIN);
-        lv_obj_set_style_text_font(group_label, &lv_font_montserrat_18, LV_PART_MAIN);
-        lv_obj_align(group_label, LV_ALIGN_LEFT_MID, 4, 0);
+        lv_obj_set_width(group_label, 242);
+        lv_obj_set_style_text_color(group_label, lv_color_hex(UI_COLOR_TEXT_PRIMARY), LV_PART_MAIN);
+        lv_obj_set_style_text_font(group_label, &lv_font_montserrat_22, LV_PART_MAIN);
+        lv_obj_align(group_label, LV_ALIGN_LEFT_MID, 64, 0);
 
         lv_obj_t* count_cell = lv_obj_create(group_card);
-        lv_obj_set_size(count_cell, 58, 50);
+        lv_obj_set_size(count_cell, 48, 48);
         lv_obj_clear_flag(count_cell, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_bg_opa(count_cell, LV_OPA_TRANSP, LV_PART_MAIN);
-        lv_obj_set_style_border_color(count_cell, lv_color_hex(0x3A3A3A), LV_PART_MAIN);
-        lv_obj_set_style_border_width(count_cell, 1, LV_PART_MAIN);
-        lv_obj_set_style_radius(count_cell, 12, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(count_cell, lv_color_hex(UI_COLOR_SURFACE_RAISED), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(count_cell, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_border_color(count_cell, lv_color_hex(UI_COLOR_ACCENT), LV_PART_MAIN);
+        lv_obj_set_style_border_width(count_cell, 2, LV_PART_MAIN);
+        lv_obj_set_style_radius(count_cell, LV_RADIUS_CIRCLE, LV_PART_MAIN);
         lv_obj_set_style_pad_all(count_cell, 0, LV_PART_MAIN);
-        lv_obj_align(count_cell, LV_ALIGN_RIGHT_MID, 0, 0);
+        lv_obj_align(count_cell, LV_ALIGN_LEFT_MID, 0, 0);
         lv_obj_t* count_label = lv_label_create(count_cell);
         char count_text[16];
         snprintf(count_text, sizeof(count_text), "%u", (unsigned)group_count);
         lv_label_set_text(count_label, count_text);
-        lv_obj_set_style_text_color(count_label, lv_color_hex(0xB8C2CC), LV_PART_MAIN);
+        lv_obj_set_style_text_color(count_label, lv_color_hex(UI_COLOR_ACCENT_SOFT), LV_PART_MAIN);
         lv_obj_set_style_text_font(count_label, &lv_font_montserrat_22, LV_PART_MAIN);
         lv_obj_center(count_label);
     }
 
-    lv_obj_t* status_title = lv_label_create(page);
-    lv_label_set_text(status_title, "Live equipment status");
-    lv_obj_set_width(status_title, lv_pct(100));
-    lv_obj_set_style_text_color(status_title, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(status_title, &lv_font_montserrat_24, LV_PART_MAIN);
+    create_section_heading(page, "Live equipment status", "Semantic status signals");
 
     generator->overview_equipment = calloc(equipment_count, sizeof(*generator->overview_equipment));
     if (generator->overview_equipment == NULL && equipment_count > 0) {
@@ -424,13 +508,21 @@ static void create_overview(ui_generator_t* generator, lv_obj_t* page)
         }
 
         lv_obj_t* status_card = lv_obj_create(page);
-        lv_obj_set_size(status_card, 300, 88);
+        lv_obj_remove_style_all(status_card);
+        lv_obj_set_size(status_card, 228, 84);
         lv_obj_clear_flag(status_card, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_bg_color(status_card, lv_color_hex(0x181818), LV_PART_MAIN);
-        lv_obj_set_style_border_color(status_card, lv_color_hex(0x444444), LV_PART_MAIN);
-        lv_obj_set_style_border_width(status_card, 1, LV_PART_MAIN);
-        lv_obj_set_style_radius(status_card, 16, LV_PART_MAIN);
-        lv_obj_set_style_pad_all(status_card, 16, LV_PART_MAIN);
+
+        lv_obj_t* status_beacon = lv_obj_create(status_card);
+        lv_obj_set_size(status_beacon, 54, 54);
+        lv_obj_clear_flag(status_beacon, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_color(status_beacon, lv_color_hex(UI_COLOR_SURFACE_RAISED), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(status_beacon, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_border_color(status_beacon, lv_color_hex(UI_COLOR_BORDER), LV_PART_MAIN);
+        lv_obj_set_style_border_width(status_beacon, 2, LV_PART_MAIN);
+        lv_obj_set_style_radius(status_beacon, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(status_beacon, 0, LV_PART_MAIN);
+        lv_obj_align(status_beacon, LV_ALIGN_LEFT_MID, 0, 0);
+        binding->state_beacon = status_beacon;
 
         const char* equipment_name =
             equipment.display_name[0] != '\0' ? equipment.display_name : equipment.browse_name;
@@ -439,21 +531,25 @@ static void create_overview(ui_generator_t* generator, lv_obj_t* page)
         lv_obj_t* equipment_label = lv_label_create(status_card);
         lv_label_set_text(equipment_label, human_equipment_name);
         lv_label_set_long_mode(equipment_label, LV_LABEL_LONG_DOT);
-        lv_obj_set_width(equipment_label, 205);
-        lv_obj_set_style_text_color(equipment_label, lv_color_white(), LV_PART_MAIN);
-        lv_obj_set_style_text_font(equipment_label, &lv_font_montserrat_20, LV_PART_MAIN);
-        lv_obj_align(equipment_label, LV_ALIGN_TOP_LEFT, 0, 0);
+        lv_obj_set_width(equipment_label, 158);
+        lv_obj_set_style_text_color(equipment_label, lv_color_hex(UI_COLOR_TEXT_PRIMARY), LV_PART_MAIN);
+        lv_obj_set_style_text_font(equipment_label, &lv_font_montserrat_18, LV_PART_MAIN);
+        lv_obj_align(equipment_label, LV_ALIGN_LEFT_MID, 68, -14);
 
-        binding->state_indicator = lv_obj_create(status_card);
+        binding->state_indicator = lv_obj_create(status_beacon);
         lv_obj_remove_style_all(binding->state_indicator);
-        lv_obj_set_size(binding->state_indicator, 22, 22);
+        lv_obj_set_size(binding->state_indicator, 18, 18);
         lv_obj_set_style_radius(binding->state_indicator, LV_RADIUS_CIRCLE, LV_PART_MAIN);
         lv_obj_set_style_bg_opa(binding->state_indicator, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_align(binding->state_indicator, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+        lv_obj_center(binding->state_indicator);
 
         binding->state_label = lv_label_create(status_card);
         lv_obj_set_style_text_font(binding->state_label, &lv_font_montserrat_16, LV_PART_MAIN);
-        lv_obj_align(binding->state_label, LV_ALIGN_BOTTOM_LEFT, 34, -1);
+        lv_obj_align(binding->state_label, LV_ALIGN_LEFT_MID, 68, 16);
+    }
+    if (generator->overview_equipment_count == 0) {
+        create_empty_state(page, "No semantic status signals",
+                           "Equipment is available on the Equipment page", lv_color_hex(UI_COLOR_ACCENT));
     }
     update_overview(generator);
 }
@@ -461,35 +557,41 @@ static void create_overview(ui_generator_t* generator, lv_obj_t* page)
 static lv_obj_t* create_summary_card(lv_obj_t* parent, const char* caption, const char* value, lv_color_t accent)
 {
     lv_obj_t* card = lv_obj_create(parent);
-    lv_obj_set_size(card, 220, 108);
-    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(card, lv_color_hex(0x181818), LV_PART_MAIN);
-    lv_obj_set_style_border_color(card, accent, LV_PART_MAIN);
-    lv_obj_set_style_border_width(card, 2, LV_PART_MAIN);
-    lv_obj_set_style_radius(card, 18, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(card, 16, LV_PART_MAIN);
+    lv_obj_set_size(card, 190, lv_pct(100));
+    style_content_card(card, lv_color_hex(UI_COLOR_SURFACE), 20);
+    lv_obj_set_style_pad_all(card, 18, LV_PART_MAIN);
+
+    lv_obj_t* accent_line = lv_obj_create(card);
+    lv_obj_remove_style_all(accent_line);
+    lv_obj_set_size(accent_line, 40, 5);
+    lv_obj_set_style_radius(accent_line, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(accent_line, accent, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(accent_line, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_align(accent_line, LV_ALIGN_TOP_LEFT, 0, 0);
 
     lv_obj_t* caption_label = lv_label_create(card);
     lv_label_set_text(caption_label, caption);
     lv_obj_set_width(caption_label, lv_pct(100));
-    lv_obj_set_style_text_align(caption_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_set_style_text_color(caption_label, lv_color_hex(0xA0A0A0), LV_PART_MAIN);
+    lv_obj_set_style_text_align(caption_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(caption_label, lv_color_hex(UI_COLOR_TEXT_SECONDARY), LV_PART_MAIN);
     lv_obj_set_style_text_font(caption_label, &lv_font_montserrat_16, LV_PART_MAIN);
-    lv_obj_align(caption_label, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_align(caption_label, LV_ALIGN_TOP_LEFT, 0, 16);
 
     lv_obj_t* value_label = lv_label_create(card);
     lv_label_set_text(value_label, value);
     lv_obj_set_width(value_label, lv_pct(100));
-    lv_obj_set_style_text_align(value_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_style_text_align(value_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
     lv_obj_set_style_text_color(value_label, accent, LV_PART_MAIN);
-    lv_obj_set_style_text_font(value_label, &lv_font_montserrat_32, LV_PART_MAIN);
-    lv_obj_align(value_label, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_text_font(value_label, &lv_font_montserrat_40, LV_PART_MAIN);
+    lv_obj_align(value_label, LV_ALIGN_BOTTOM_LEFT, 0, 0);
     return value_label;
 }
 
 static void update_overview(ui_generator_t* generator)
 {
-    if (generator == NULL || generator->overview_running_value == NULL || generator->overview_alarm_value == NULL) {
+    if (generator == NULL || generator->overview_running_value == NULL || generator->overview_alarm_value == NULL ||
+        generator->overview_state_value == NULL || generator->overview_state_detail == NULL ||
+        generator->overview_state_indicator == NULL) {
         return;
     }
     size_t running_count = 0;
@@ -508,12 +610,21 @@ static void update_overview(ui_generator_t* generator)
         running_count += running ? 1U : 0U;
         alarm_status_count += alarm_active ? 1U : 0U;
 
-        lv_color_t state_color = alarm_active ? lv_color_hex(0xE63946)
-                                               : (running ? lv_color_hex(0x38B000) : lv_color_hex(0x666666));
+        lv_color_t state_color = alarm_active ? lv_color_hex(UI_COLOR_DANGER)
+                                               : (running ? lv_color_hex(UI_COLOR_SUCCESS)
+                                                          : lv_color_hex(UI_COLOR_INACTIVE));
         const char* state_text = alarm_active ? "ALARM" : (running ? "RUNNING" : "STOPPED");
-        lv_obj_set_style_bg_color(binding->state_indicator, state_color, LV_PART_MAIN);
-        lv_label_set_text(binding->state_label, state_text);
-        lv_obj_set_style_text_color(binding->state_label, state_color, LV_PART_MAIN);
+        if (! binding->displayed_state_valid || running != binding->displayed_running ||
+            alarm_active != binding->displayed_alarm) {
+            lv_obj_set_style_bg_color(binding->state_indicator, state_color, LV_PART_MAIN);
+            lv_obj_set_style_border_color(binding->state_beacon, state_color, LV_PART_MAIN);
+            lv_obj_set_style_border_opa(binding->state_beacon, LV_OPA_60, LV_PART_MAIN);
+            lv_label_set_text(binding->state_label, state_text);
+            lv_obj_set_style_text_color(binding->state_label, state_color, LV_PART_MAIN);
+            binding->displayed_running = running;
+            binding->displayed_alarm = alarm_active;
+            binding->displayed_state_valid = true;
+        }
     }
 
     size_t active_alarm_count = data_model_active_alarm_count(generator->data_model);
@@ -522,9 +633,32 @@ static void update_overview(ui_generator_t* generator)
     }
     char count_text[16];
     snprintf(count_text, sizeof(count_text), "%u", (unsigned)running_count);
-    lv_label_set_text(generator->overview_running_value, count_text);
+    set_label_text_if_changed(generator->overview_running_value, count_text);
     snprintf(count_text, sizeof(count_text), "%u", (unsigned)active_alarm_count);
-    lv_label_set_text(generator->overview_alarm_value, count_text);
+    set_label_text_if_changed(generator->overview_alarm_value, count_text);
+
+    const char* overview_state;
+    lv_color_t overview_color;
+    if (active_alarm_count > 0) {
+        overview_state = "Attention required";
+        overview_color = lv_color_hex(UI_COLOR_DANGER);
+    } else if (generator->overview_equipment_count == 0) {
+        overview_state = "Equipment discovered";
+        overview_color = lv_color_hex(UI_COLOR_ACCENT);
+    } else if (running_count > 0) {
+        overview_state = "System operational";
+        overview_color = lv_color_hex(UI_COLOR_SUCCESS);
+    } else {
+        overview_state = "Equipment ready";
+        overview_color = lv_color_hex(UI_COLOR_INACTIVE);
+    }
+    set_label_text_if_changed(generator->overview_state_value, overview_state);
+    char state_detail[64];
+    snprintf(state_detail, sizeof(state_detail), "%u of %u active  |  %u alarms",
+             (unsigned)running_count, (unsigned)generator->overview_equipment_count,
+             (unsigned)active_alarm_count);
+    set_label_text_if_changed(generator->overview_state_detail, state_detail);
+    lv_obj_set_style_bg_color(generator->overview_state_indicator, overview_color, LV_PART_MAIN);
 }
 
 static void rebuild_alarm_list(ui_generator_t* generator)
@@ -534,21 +668,13 @@ static void rebuild_alarm_list(ui_generator_t* generator)
     }
     lv_obj_clean(generator->alarms_host);
     size_t active_alarm_count = data_model_active_alarm_count(generator->data_model);
+    char alarm_count_text[48];
+    snprintf(alarm_count_text, sizeof(alarm_count_text), "%u active",
+             (unsigned)active_alarm_count);
+    create_section_heading(generator->alarms_host, "Alarm center", alarm_count_text);
+
     if (active_alarm_count == 0) {
-        lv_obj_t* empty_card = lv_obj_create(generator->alarms_host);
-        lv_obj_set_size(empty_card, lv_pct(100), 112);
-        lv_obj_set_style_bg_color(empty_card, lv_color_hex(0x122117), LV_PART_MAIN);
-        lv_obj_set_style_border_color(empty_card, lv_color_hex(0x38B000), LV_PART_MAIN);
-        lv_obj_set_style_border_width(empty_card, 2, LV_PART_MAIN);
-        lv_obj_set_style_radius(empty_card, 18, LV_PART_MAIN);
-        lv_obj_t* empty_label = lv_label_create(empty_card);
-        lv_label_set_text(empty_label, "No active alarms\nAll monitored equipment is normal");
-        lv_label_set_long_mode(empty_label, LV_LABEL_LONG_WRAP);
-        lv_obj_set_width(empty_label, lv_pct(100));
-        lv_obj_set_style_text_align(empty_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-        lv_obj_set_style_text_color(empty_label, lv_color_hex(0x7DDB91), LV_PART_MAIN);
-        lv_obj_set_style_text_font(empty_label, &lv_font_montserrat_22, LV_PART_MAIN);
-        lv_obj_center(empty_label);
+        create_alarm_clear_state(generator->alarms_host);
         return;
     }
 
@@ -557,79 +683,93 @@ static void rebuild_alarm_list(ui_generator_t* generator)
         if (!data_model_get_active_alarm(generator->data_model, alarm_index, &alarm)) {
             continue;
         }
-        lv_color_t alarm_color = alarm.severity >= 800 ? lv_color_hex(0xE63946) : lv_color_hex(0xF0A202);
+        lv_color_t alarm_color =
+            alarm.severity >= 800 ? lv_color_hex(UI_COLOR_DANGER) : lv_color_hex(UI_COLOR_WARNING);
         lv_obj_t* alarm_card = lv_obj_create(generator->alarms_host);
-        lv_obj_set_size(alarm_card, lv_pct(100), 132);
-        lv_obj_clear_flag(alarm_card, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_bg_color(alarm_card, lv_color_hex(0x211315), LV_PART_MAIN);
-        lv_obj_set_style_border_color(alarm_card, alarm_color, LV_PART_MAIN);
-        lv_obj_set_style_border_width(alarm_card, 2, LV_PART_MAIN);
-        lv_obj_set_style_radius(alarm_card, 18, LV_PART_MAIN);
+        lv_obj_set_size(alarm_card, lv_pct(97), 118);
+        style_content_card(alarm_card, lv_color_hex(UI_COLOR_SURFACE), 20);
         lv_obj_set_style_pad_all(alarm_card, 18, LV_PART_MAIN);
 
-        lv_obj_t* indicator = lv_obj_create(alarm_card);
-        lv_obj_remove_style_all(indicator);
-        lv_obj_set_size(indicator, 24, 24);
-        lv_obj_set_style_radius(indicator, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(indicator, alarm_color, LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(indicator, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_align(indicator, LV_ALIGN_TOP_LEFT, 0, 2);
+        lv_obj_t* severity_badge = lv_obj_create(alarm_card);
+        lv_obj_set_size(severity_badge, 58, 58);
+        lv_obj_clear_flag(severity_badge, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_color(severity_badge, alarm_color, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(severity_badge, LV_OPA_20, LV_PART_MAIN);
+        lv_obj_set_style_border_color(severity_badge, alarm_color, LV_PART_MAIN);
+        lv_obj_set_style_border_width(severity_badge, 2, LV_PART_MAIN);
+        lv_obj_set_style_radius(severity_badge, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(severity_badge, 0, LV_PART_MAIN);
+        lv_obj_align(severity_badge, LV_ALIGN_LEFT_MID, 0, 0);
+
+        lv_obj_t* severity_symbol = lv_label_create(severity_badge);
+        lv_label_set_text(severity_symbol, "!");
+        lv_obj_set_style_text_color(severity_symbol, alarm_color, LV_PART_MAIN);
+        lv_obj_set_style_text_font(severity_symbol, &lv_font_montserrat_30, LV_PART_MAIN);
+        lv_obj_center(severity_symbol);
+
+        lv_obj_t* severity_label = lv_label_create(alarm_card);
+        lv_label_set_text(severity_label, alarm.severity >= 800 ? "CRITICAL" : "WARNING");
+        lv_obj_set_style_text_color(severity_label, alarm_color, LV_PART_MAIN);
+        lv_obj_set_style_text_font(severity_label, &lv_font_montserrat_14, LV_PART_MAIN);
+        lv_obj_align(severity_label, LV_ALIGN_TOP_RIGHT, 0, 2);
 
         lv_obj_t* source_label = lv_label_create(alarm_card);
         char human_source_name[UI_HUMAN_NAME_LENGTH];
         copy_humanized_name(human_source_name, sizeof(human_source_name), alarm.source_name);
         lv_label_set_text(source_label, human_source_name);
-        lv_obj_set_style_text_color(source_label, lv_color_white(), LV_PART_MAIN);
+        lv_label_set_long_mode(source_label, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(source_label, lv_pct(58));
+        lv_obj_set_style_text_color(source_label, lv_color_hex(UI_COLOR_TEXT_PRIMARY), LV_PART_MAIN);
         lv_obj_set_style_text_font(source_label, &lv_font_montserrat_22, LV_PART_MAIN);
-        lv_obj_align(source_label, LV_ALIGN_TOP_LEFT, 38, 0);
+        lv_obj_align(source_label, LV_ALIGN_TOP_LEFT, 78, 0);
 
         lv_obj_t* reason_label = lv_label_create(alarm_card);
         lv_label_set_text(reason_label, alarm.reason);
-        lv_label_set_long_mode(reason_label, LV_LABEL_LONG_WRAP);
-        lv_obj_set_width(reason_label, lv_pct(100));
-        lv_obj_set_style_text_color(reason_label, lv_color_hex(0xE0E0E0), LV_PART_MAIN);
+        lv_label_set_long_mode(reason_label, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(reason_label, lv_pct(78));
+        lv_obj_set_style_text_color(reason_label, lv_color_hex(UI_COLOR_TEXT_PRIMARY), LV_PART_MAIN);
         lv_obj_set_style_text_font(reason_label, &lv_font_montserrat_18, LV_PART_MAIN);
-        lv_obj_align(reason_label, LV_ALIGN_TOP_LEFT, 0, 40);
+        lv_obj_align(reason_label, LV_ALIGN_TOP_LEFT, 78, 34);
 
         char details[80];
         snprintf(details, sizeof(details), "%.47s  |  Severity %u", alarm.alarm_code, (unsigned)alarm.severity);
         lv_obj_t* details_label = lv_label_create(alarm_card);
         lv_label_set_text(details_label, details);
-        lv_obj_set_style_text_color(details_label, alarm_color, LV_PART_MAIN);
-        lv_obj_set_style_text_font(details_label, &lv_font_montserrat_14, LV_PART_MAIN);
-        lv_obj_align(details_label, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+        lv_obj_set_style_text_color(details_label, lv_color_hex(UI_COLOR_TEXT_SECONDARY), LV_PART_MAIN);
+        lv_obj_set_style_text_font(details_label, &lv_font_montserrat_16, LV_PART_MAIN);
+        lv_obj_align(details_label, LV_ALIGN_BOTTOM_LEFT, 78, 0);
     }
 }
 
 static void create_equipment_section(ui_generator_t* generator, lv_obj_t* page,
                                      const data_model_equipment_t* equipment)
 {
-    const char* equipment_name = equipment->display_name[0] != '\0' ? equipment->display_name : equipment->browse_name;
-    char human_equipment_name[UI_HUMAN_NAME_LENGTH];
-    copy_humanized_name(human_equipment_name, sizeof(human_equipment_name), equipment_name);
-    lv_obj_t* section_title    = lv_label_create(page);
-    lv_label_set_text(section_title, human_equipment_name);
-    lv_obj_set_width(section_title, lv_pct(100));
-    lv_obj_set_style_text_color(section_title, lv_color_hex(0x6BC1FF), LV_PART_MAIN);
-    lv_obj_set_style_text_font(section_title, &lv_font_montserrat_24, LV_PART_MAIN);
-    lv_obj_set_style_pad_top(section_title, 8, LV_PART_MAIN);
-    lv_obj_set_style_pad_bottom(section_title, 2, LV_PART_MAIN);
-
     size_t matching_tags = 0;
     size_t tag_count     = data_model_tag_count(generator->data_model);
     for (size_t tag_index = 0; tag_index < tag_count; ++tag_index) {
         data_model_tag_t tag;
-        if (data_model_get_tag(generator->data_model, tag_index, &tag) && tag.equipment_index == equipment->index) {
-            create_tag_widget(generator, page, &tag);
+        if (data_model_get_tag(generator->data_model, tag_index, &tag) &&
+            tag.equipment_index == equipment->index) {
             matching_tags++;
         }
     }
+
+    const char* equipment_name = equipment->display_name[0] != '\0' ? equipment->display_name : equipment->browse_name;
+    char human_equipment_name[UI_HUMAN_NAME_LENGTH];
+    copy_humanized_name(human_equipment_name, sizeof(human_equipment_name), equipment_name);
+    char section_detail[48];
+    snprintf(section_detail, sizeof(section_detail), "%u variables", (unsigned)matching_tags);
+    create_section_heading(page, human_equipment_name, section_detail);
+
+    for (size_t tag_index = 0; tag_index < tag_count; ++tag_index) {
+        data_model_tag_t tag;
+        if (data_model_get_tag(generator->data_model, tag_index, &tag) && tag.equipment_index == equipment->index) {
+            create_tag_widget(generator, page, &tag);
+        }
+    }
     if (matching_tags == 0) {
-        lv_obj_t* empty_label = lv_label_create(page);
-        lv_label_set_text(empty_label, "No variables on this object");
-        lv_obj_set_width(empty_label, lv_pct(100));
-        lv_obj_set_style_text_color(empty_label, lv_color_hex(0xA0A0A0), LV_PART_MAIN);
-        lv_obj_set_style_text_font(empty_label, &lv_font_montserrat_20, LV_PART_MAIN);
+        create_empty_state(page, "No readable variables", "The OPC UA object contains no supported values",
+                           lv_color_hex(UI_COLOR_ACCENT));
     }
 }
 
@@ -653,13 +793,9 @@ static size_t create_controls_section(ui_generator_t* generator, lv_obj_t* page,
         equipment->display_name[0] != '\0' ? equipment->display_name : equipment->browse_name;
     char human_equipment_name[UI_HUMAN_NAME_LENGTH];
     copy_humanized_name(human_equipment_name, sizeof(human_equipment_name), equipment_name);
-    lv_obj_t* section_title = lv_label_create(page);
-    lv_label_set_text(section_title, human_equipment_name);
-    lv_obj_set_width(section_title, lv_pct(100));
-    lv_obj_set_style_text_color(section_title, lv_color_hex(0x6BC1FF), LV_PART_MAIN);
-    lv_obj_set_style_text_font(section_title, &lv_font_montserrat_24, LV_PART_MAIN);
-    lv_obj_set_style_pad_top(section_title, 10, LV_PART_MAIN);
-    lv_obj_set_style_pad_bottom(section_title, 2, LV_PART_MAIN);
+    char section_detail[48];
+    snprintf(section_detail, sizeof(section_detail), "%u controls", (unsigned)writable_count);
+    create_section_heading(page, human_equipment_name, section_detail);
 
     for (size_t tag_index = 0; tag_index < tag_count; ++tag_index) {
         data_model_tag_t tag;
@@ -683,53 +819,58 @@ static void create_tag_widget(ui_generator_t* generator, lv_obj_t* parent, const
 
     bool is_boolean = tag->data_type == DATA_MODEL_TYPE_BOOLEAN;
     lv_obj_t* card = lv_obj_create(parent);
-    lv_obj_set_size(card, 310, is_boolean ? 132 : 180);
-    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(card, lv_color_hex(0x181818), LV_PART_MAIN);
-    lv_obj_set_style_border_color(card, lv_color_hex(0x444444), LV_PART_MAIN);
-    lv_obj_set_style_border_width(card, 2, LV_PART_MAIN);
-    lv_obj_set_style_radius(card, 18, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(card, 18, LV_PART_MAIN);
+    lv_obj_set_size(card, is_boolean ? 228 : 310, is_boolean ? 112 : 156);
+    style_content_card(card,
+                       lv_color_hex(tag->writable ? UI_COLOR_SURFACE_RAISED : UI_COLOR_SURFACE), 20);
+    lv_obj_set_style_pad_all(card, 16, LV_PART_MAIN);
+    if (tag->writable) {
+        lv_obj_set_style_border_color(card, lv_color_hex(UI_COLOR_ACCENT), LV_PART_MAIN);
+        lv_obj_set_style_border_opa(card, LV_OPA_40, LV_PART_MAIN);
+    }
 
     lv_obj_t* name_label = lv_label_create(card);
     const char* tag_name = tag->display_name[0] != '\0' ? tag->display_name : tag->browse_name;
     char human_tag_name[UI_HUMAN_NAME_LENGTH];
     copy_humanized_name(human_tag_name, sizeof(human_tag_name), tag_name);
     lv_label_set_text(name_label, human_tag_name);
-    lv_label_set_long_mode(name_label, LV_LABEL_LONG_WRAP);
+    lv_label_set_long_mode(name_label, LV_LABEL_LONG_DOT);
     lv_obj_set_width(name_label, lv_pct(100));
-    lv_obj_set_style_text_color(name_label, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(name_label, &lv_font_montserrat_20, LV_PART_MAIN);
+    lv_obj_set_style_text_color(name_label, lv_color_hex(UI_COLOR_TEXT_LABEL), LV_PART_MAIN);
+    lv_obj_set_style_text_font(name_label, &lv_font_montserrat_18, LV_PART_MAIN);
     lv_obj_align(name_label, LV_ALIGN_TOP_LEFT, 0, 0);
 
     binding->value_label = lv_label_create(card);
-    lv_obj_set_style_text_color(binding->value_label, lv_color_hex(0x2A96FF), LV_PART_MAIN);
+    lv_obj_set_width(binding->value_label, is_boolean ? 112 : 202);
+    lv_label_set_long_mode(binding->value_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(binding->value_label, lv_color_hex(UI_COLOR_ACCENT_SOFT), LV_PART_MAIN);
     lv_obj_set_style_text_font(binding->value_label,
-                               is_boolean ? &lv_font_montserrat_22 : &lv_font_montserrat_28, LV_PART_MAIN);
+                               is_boolean ? &lv_font_montserrat_22 : &lv_font_montserrat_30, LV_PART_MAIN);
     lv_obj_align(binding->value_label, LV_ALIGN_BOTTOM_LEFT, 0, 0);
 
     if (is_boolean) {
         if (tag->writable) {
             binding->widget_type   = GENERATED_WIDGET_BOOLEAN_SWITCH;
             binding->visual_object = lv_switch_create(card);
-            lv_obj_set_size(binding->visual_object, 68, 38);
-            lv_obj_set_style_bg_color(binding->visual_object, lv_color_hex(0x242424), LV_PART_MAIN);
+            lv_obj_set_size(binding->visual_object, 72, 36);
+            lv_obj_set_style_bg_color(binding->visual_object, lv_color_hex(UI_COLOR_BORDER), LV_PART_MAIN);
             lv_obj_set_style_bg_opa(binding->visual_object, LV_OPA_COVER, LV_PART_MAIN);
-            lv_obj_set_style_border_color(binding->visual_object, lv_color_hex(0x444444), LV_PART_MAIN);
+            lv_obj_set_style_border_color(binding->visual_object, lv_color_hex(UI_COLOR_CONTROL_BORDER),
+                                          LV_PART_MAIN);
             lv_obj_set_style_border_width(binding->visual_object, 1, LV_PART_MAIN);
-            lv_obj_set_style_bg_color(binding->visual_object, lv_color_hex(0x2A96FF),
+            lv_obj_set_style_bg_color(binding->visual_object, lv_color_hex(UI_COLOR_ACCENT),
                                       LV_PART_INDICATOR | LV_STATE_CHECKED);
-            lv_obj_set_style_bg_color(binding->visual_object, lv_color_hex(0xE8E8E8), LV_PART_KNOB);
-            lv_obj_align(binding->visual_object, LV_ALIGN_BOTTOM_RIGHT, 0, 2);
+            lv_obj_set_style_bg_color(binding->visual_object, lv_color_hex(UI_COLOR_TEXT_PRIMARY), LV_PART_KNOB);
+            lv_obj_set_style_pad_all(binding->visual_object, 2, LV_PART_KNOB);
+            lv_obj_align(binding->visual_object, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
             lv_obj_add_event_cb(binding->visual_object, boolean_switch_event, LV_EVENT_VALUE_CHANGED, binding);
         } else {
             binding->widget_type   = GENERATED_WIDGET_BOOLEAN_INDICATOR;
             binding->visual_object = lv_obj_create(card);
             lv_obj_remove_style_all(binding->visual_object);
-            lv_obj_set_size(binding->visual_object, 30, 30);
+            lv_obj_set_size(binding->visual_object, 18, 18);
             lv_obj_set_style_radius(binding->visual_object, LV_RADIUS_CIRCLE, LV_PART_MAIN);
             lv_obj_set_style_bg_opa(binding->visual_object, LV_OPA_COVER, LV_PART_MAIN);
-            lv_obj_align(binding->visual_object, LV_ALIGN_BOTTOM_RIGHT, -4, 4);
+            lv_obj_align(binding->visual_object, LV_ALIGN_BOTTOM_RIGHT, -4, -2);
         }
     } else if (tag->data_type == DATA_MODEL_TYPE_FLOAT || tag->data_type == DATA_MODEL_TYPE_DOUBLE ||
                tag->data_type == DATA_MODEL_TYPE_INTEGER) {
@@ -748,9 +889,16 @@ static void create_tag_widget(ui_generator_t* generator, lv_obj_t* parent, const
             lv_bar_set_range(binding->visual_object, scale_numeric_for_widget(minimum),
                              scale_numeric_for_widget(maximum));
         }
-        lv_obj_set_size(binding->visual_object, 270, 24);
-        lv_obj_set_style_bg_color(binding->visual_object, lv_color_hex(0x2A96FF), LV_PART_INDICATOR);
-        lv_obj_align(binding->visual_object, LV_ALIGN_CENTER, 0, 7);
+        lv_obj_set_size(binding->visual_object, 276, tag->writable ? 22 : 16);
+        lv_obj_set_style_bg_color(binding->visual_object, lv_color_hex(UI_COLOR_BORDER), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(binding->visual_object, lv_color_hex(UI_COLOR_ACCENT), LV_PART_INDICATOR);
+        lv_obj_set_style_radius(binding->visual_object, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_radius(binding->visual_object, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
+        if (tag->writable) {
+            lv_obj_set_style_bg_color(binding->visual_object, lv_color_hex(UI_COLOR_TEXT_PRIMARY), LV_PART_KNOB);
+            lv_obj_set_style_pad_all(binding->visual_object, 6, LV_PART_KNOB);
+        }
+        lv_obj_align(binding->visual_object, LV_ALIGN_CENTER, 0, 11);
     } else {
         binding->widget_type = GENERATED_WIDGET_TEXT;
     }
@@ -767,6 +915,7 @@ static void update_widget(generated_widget_binding_t* binding, const data_model_
     binding->updating_from_model = true;
     if (! tag->value_valid) {
         lv_label_set_text(binding->value_label, "No value");
+        lv_obj_set_style_text_color(binding->value_label, lv_color_hex(UI_COLOR_TEXT_SECONDARY), LV_PART_MAIN);
         binding->updating_from_model = false;
         return;
     }
@@ -792,10 +941,10 @@ static void update_widget(generated_widget_binding_t* binding, const data_model_
             }
         }
         lv_label_set_text(binding->value_label, displayed_value ? "ON" : "OFF");
+        lv_color_t state_color = boolean_state_color(tag, displayed_value);
+        lv_obj_set_style_text_color(binding->value_label, state_color, LV_PART_MAIN);
         if (binding->widget_type == GENERATED_WIDGET_BOOLEAN_INDICATOR) {
-            lv_obj_set_style_bg_color(binding->visual_object,
-                                      displayed_value ? lv_color_hex(0x38B000) : lv_color_hex(0xE63946),
-                                      LV_PART_MAIN);
+            lv_obj_set_style_bg_color(binding->visual_object, state_color, LV_PART_MAIN);
         } else if (binding->widget_type == GENERATED_WIDGET_BOOLEAN_SWITCH) {
             if (displayed_value) {
                 lv_obj_add_state(binding->visual_object, LV_STATE_CHECKED);
@@ -807,6 +956,7 @@ static void update_widget(generated_widget_binding_t* binding, const data_model_
     }
     case DATA_MODEL_TYPE_INTEGER:
         {
+            lv_obj_set_style_text_color(binding->value_label, lv_color_hex(UI_COLOR_ACCENT_SOFT), LV_PART_MAIN);
             char value_text[64];
             char display_unit[DATA_MODEL_UNIT_LENGTH];
             copy_display_unit(display_unit, sizeof(display_unit), tag->engineering_unit);
@@ -817,7 +967,7 @@ static void update_widget(generated_widget_binding_t* binding, const data_model_
         if (binding->visual_object != NULL) {
             int32_t scaled_value = scale_numeric_for_widget((double)tag->value.integer_value);
             if (binding->widget_type == GENERATED_WIDGET_NUMERIC_BAR) {
-                lv_bar_set_value(binding->visual_object, scaled_value, LV_ANIM_ON);
+                lv_bar_set_value(binding->visual_object, scaled_value, LV_ANIM_OFF);
             } else {
                 lv_slider_set_value(binding->visual_object, scaled_value, LV_ANIM_OFF);
             }
@@ -825,22 +975,25 @@ static void update_widget(generated_widget_binding_t* binding, const data_model_
         break;
     case DATA_MODEL_TYPE_FLOAT:
     case DATA_MODEL_TYPE_DOUBLE: {
+        lv_obj_set_style_text_color(binding->value_label, lv_color_hex(UI_COLOR_ACCENT_SOFT), LV_PART_MAIN);
         set_numeric_label(binding->value_label, tag->value.numeric_value, tag->engineering_unit);
         if (!isfinite(tag->value.numeric_value)) {
             break;
         }
         int32_t scaled_value = scale_numeric_for_widget(tag->value.numeric_value);
         if (binding->widget_type == GENERATED_WIDGET_NUMERIC_BAR) {
-            lv_bar_set_value(binding->visual_object, scaled_value, LV_ANIM_ON);
+            lv_bar_set_value(binding->visual_object, scaled_value, LV_ANIM_OFF);
         } else if (binding->widget_type == GENERATED_WIDGET_NUMERIC_SLIDER) {
             lv_slider_set_value(binding->visual_object, scaled_value, LV_ANIM_OFF);
         }
         break;
     }
     case DATA_MODEL_TYPE_STRING:
+        lv_obj_set_style_text_color(binding->value_label, lv_color_hex(UI_COLOR_TEXT_PRIMARY), LV_PART_MAIN);
         lv_label_set_text(binding->value_label, tag->value.string_value);
         break;
     default:
+        lv_obj_set_style_text_color(binding->value_label, lv_color_hex(UI_COLOR_TEXT_SECONDARY), LV_PART_MAIN);
         lv_label_set_text(binding->value_label, "Unsupported OPC UA type");
         break;
     }
@@ -1081,8 +1234,154 @@ static void style_page_as_grid(lv_obj_t* page)
     }
     lv_obj_set_flex_flow(page, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(page, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-    lv_obj_set_style_pad_row(page, 18, LV_PART_MAIN);
-    lv_obj_set_style_pad_column(page, 18, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(page, lv_color_hex(UI_COLOR_BACKGROUND), LV_PART_MAIN);
+    lv_obj_set_style_pad_row(page, 16, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(page, 16, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(page, lv_color_hex(UI_COLOR_ACCENT), LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(page, LV_RADIUS_CIRCLE, LV_PART_SCROLLBAR);
+}
+
+/** Apply the shared quiet surface treatment used outside the Settings UI. */
+static void style_content_card(lv_obj_t* card, lv_color_t background, lv_coord_t radius)
+{
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(card, background, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(card, lv_color_hex(UI_COLOR_BORDER), LV_PART_MAIN);
+    lv_obj_set_style_border_width(card, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(card, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(card, radius, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(card, 0, LV_PART_MAIN);
+}
+
+/** Create a full-width section marker that keeps generated groups easy to scan. */
+static void create_section_heading(lv_obj_t* parent, const char* title, const char* detail)
+{
+    lv_obj_t* heading = lv_obj_create(parent);
+    lv_obj_remove_style_all(heading);
+    lv_obj_set_size(heading, lv_pct(97), 48);
+    lv_obj_clear_flag(heading, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* accent = lv_obj_create(heading);
+    lv_obj_remove_style_all(accent);
+    lv_obj_set_size(accent, 5, 28);
+    lv_obj_set_style_radius(accent, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(accent, lv_color_hex(UI_COLOR_ACCENT), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(accent, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_align(accent, LV_ALIGN_LEFT_MID, 2, 0);
+
+    lv_obj_t* title_label = lv_label_create(heading);
+    lv_label_set_text(title_label, title != NULL ? title : "");
+    lv_label_set_long_mode(title_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(title_label, lv_pct(70));
+    lv_obj_set_style_text_color(title_label, lv_color_hex(UI_COLOR_TEXT_PRIMARY), LV_PART_MAIN);
+    lv_obj_set_style_text_font(title_label, &lv_font_montserrat_24, LV_PART_MAIN);
+    lv_obj_align(title_label, LV_ALIGN_LEFT_MID, 24, 0);
+
+    if (detail != NULL && detail[0] != '\0') {
+        lv_obj_t* detail_label = lv_label_create(heading);
+        lv_label_set_text(detail_label, detail);
+        lv_obj_set_style_text_color(detail_label, lv_color_hex(UI_COLOR_TEXT_SECONDARY), LV_PART_MAIN);
+        lv_obj_set_style_text_font(detail_label, &lv_font_montserrat_16, LV_PART_MAIN);
+        lv_obj_align(detail_label, LV_ALIGN_RIGHT_MID, 0, 1);
+    }
+}
+
+/** Create a calm empty state without using a large semantic color field. */
+static void create_empty_state(lv_obj_t* parent, const char* title, const char* detail, lv_color_t accent)
+{
+    lv_obj_t* card = lv_obj_create(parent);
+    lv_obj_set_size(card, lv_pct(97), 124);
+    style_content_card(card, lv_color_hex(UI_COLOR_SURFACE), 20);
+    lv_obj_set_style_pad_all(card, 22, LV_PART_MAIN);
+
+    lv_obj_t* indicator = lv_obj_create(card);
+    lv_obj_remove_style_all(indicator);
+    lv_obj_set_size(indicator, 20, 20);
+    lv_obj_set_style_radius(indicator, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(indicator, accent, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(indicator, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_align(indicator, LV_ALIGN_LEFT_MID, 0, 0);
+
+    lv_obj_t* title_label = lv_label_create(card);
+    lv_label_set_text(title_label, title != NULL ? title : "");
+    lv_obj_set_style_text_color(title_label, lv_color_hex(UI_COLOR_TEXT_PRIMARY), LV_PART_MAIN);
+    lv_obj_set_style_text_font(title_label, &lv_font_montserrat_22, LV_PART_MAIN);
+    lv_obj_align(title_label, LV_ALIGN_LEFT_MID, 40, -16);
+
+    lv_obj_t* detail_label = lv_label_create(card);
+    lv_label_set_text(detail_label, detail != NULL ? detail : "");
+    lv_label_set_long_mode(detail_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(detail_label, lv_pct(82));
+    lv_obj_set_style_text_color(detail_label, lv_color_hex(UI_COLOR_TEXT_SECONDARY), LV_PART_MAIN);
+    lv_obj_set_style_text_font(detail_label, &lv_font_montserrat_18, LV_PART_MAIN);
+    lv_obj_align(detail_label, LV_ALIGN_LEFT_MID, 40, 18);
+}
+
+/** Match the active-alarm visual language while clearly showing a healthy state. */
+static void create_alarm_clear_state(lv_obj_t* parent)
+{
+    lv_color_t healthy_color = lv_color_hex(UI_COLOR_SUCCESS);
+    lv_obj_t* card = lv_obj_create(parent);
+    lv_obj_set_size(card, lv_pct(97), 118);
+    style_content_card(card, lv_color_hex(UI_COLOR_SURFACE), 20);
+    lv_obj_set_style_pad_all(card, 18, LV_PART_MAIN);
+
+    lv_obj_t* status_badge = lv_obj_create(card);
+    lv_obj_set_size(status_badge, 58, 58);
+    lv_obj_clear_flag(status_badge, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(status_badge, healthy_color, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(status_badge, LV_OPA_20, LV_PART_MAIN);
+    lv_obj_set_style_border_color(status_badge, healthy_color, LV_PART_MAIN);
+    lv_obj_set_style_border_width(status_badge, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(status_badge, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(status_badge, 0, LV_PART_MAIN);
+    lv_obj_align(status_badge, LV_ALIGN_LEFT_MID, 0, 0);
+
+    lv_obj_t* status_symbol = lv_label_create(status_badge);
+    lv_label_set_text(status_symbol, LV_SYMBOL_OK);
+    lv_obj_set_style_text_color(status_symbol, healthy_color, LV_PART_MAIN);
+    lv_obj_set_style_text_font(status_symbol, &lv_font_montserrat_30, LV_PART_MAIN);
+    lv_obj_center(status_symbol);
+
+    lv_obj_t* title_label = lv_label_create(card);
+    lv_label_set_text(title_label, "All equipment is normal");
+    lv_obj_set_style_text_color(title_label, lv_color_hex(UI_COLOR_TEXT_PRIMARY), LV_PART_MAIN);
+    lv_obj_set_style_text_font(title_label, &lv_font_montserrat_22, LV_PART_MAIN);
+    lv_obj_align(title_label, LV_ALIGN_LEFT_MID, 78, -15);
+
+    lv_obj_t* detail_label = lv_label_create(card);
+    lv_label_set_text(detail_label, "No active alarms reported by OPC UA");
+    lv_obj_set_style_text_color(detail_label, lv_color_hex(UI_COLOR_TEXT_SECONDARY), LV_PART_MAIN);
+    lv_obj_set_style_text_font(detail_label, &lv_font_montserrat_18, LV_PART_MAIN);
+    lv_obj_align(detail_label, LV_ALIGN_LEFT_MID, 78, 17);
+}
+
+/** Map Boolean semantics to color without relying on equipment or tag names. */
+static lv_color_t boolean_state_color(const data_model_tag_t* tag, bool value)
+{
+    if (! value) {
+        return lv_color_hex(UI_COLOR_INACTIVE);
+    }
+    if (tag != NULL && strcmp(tag->semantic_role, "alarm_status") == 0) {
+        return lv_color_hex(UI_COLOR_DANGER);
+    }
+    if (tag != NULL && strcmp(tag->semantic_role, "operating_status") == 0) {
+        return lv_color_hex(UI_COLOR_SUCCESS);
+    }
+    return lv_color_hex(UI_COLOR_ACCENT);
+}
+
+/** Avoid invalidating labels when a periodic refresh produces identical text. */
+static void set_label_text_if_changed(lv_obj_t* label, const char* text)
+{
+    if (label == NULL || text == NULL) {
+        return;
+    }
+    const char* current_text = lv_label_get_text(label);
+    if (current_text == NULL || strcmp(current_text, text) != 0) {
+        lv_label_set_text(label, text);
+    }
 }
 
 static generated_widget_binding_t* allocate_binding(ui_generator_t* generator)
