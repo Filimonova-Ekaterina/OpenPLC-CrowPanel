@@ -8,13 +8,17 @@
 #define TRENDS_MAX_CHARTS       16
 #define TRENDS_POINT_COUNT      60
 #define TRENDS_SAMPLE_PERIOD_MS 1000
+#define TRENDS_ANALYSIS_POINTS  12
 
-#define TRENDS_COLOR_SURFACE        0x151515
-#define TRENDS_COLOR_BORDER         0x303030
-#define TRENDS_COLOR_TEXT_PRIMARY   0xF4F4F4
-#define TRENDS_COLOR_TEXT_SECONDARY 0xA0A0A0
+#define TRENDS_COLOR_SURFACE        0x11171C
+#define TRENDS_COLOR_SURFACE_RAISED 0x151D23
+#define TRENDS_COLOR_BORDER         0x34414A
+#define TRENDS_COLOR_TEXT_PRIMARY   0xF4F7F9
+#define TRENDS_COLOR_TEXT_SECONDARY 0x97A3AB
 #define TRENDS_COLOR_ACCENT         0x2A96FF
 #define TRENDS_COLOR_ACCENT_SOFT    0x6BC1FF
+#define TRENDS_COLOR_SUCCESS        0x58D000
+#define TRENDS_COLOR_WARNING        0xF0A202
 
 typedef struct
 {
@@ -22,6 +26,8 @@ typedef struct
     lv_obj_t* chart;
     lv_chart_series_t* series;
     lv_obj_t* value_label;
+    lv_obj_t* analysis_dot;
+    lv_obj_t* analysis_label;
     double samples[TRENDS_POINT_COUNT];
     bool sample_valid[TRENDS_POINT_COUNT];
 } trend_binding_t;
@@ -37,14 +43,17 @@ typedef struct
 
 static void sample_timer_callback(lv_timer_t* timer);
 static void root_deleted_event(lv_event_t* event);
+static bool tag_is_numeric(const data_model_tag_t* tag);
 static bool tag_numeric_value(const data_model_tag_t* tag, double* value_out);
+static void create_heading(lv_obj_t* parent, size_t visible_count, size_t total_count);
+static void create_empty_state(lv_obj_t* parent);
+static void create_chart_card(trends_context_t* context, const data_model_tag_t* tag);
 static void sample_binding(trends_context_t* context, trend_binding_t* binding);
 static void update_chart_points(trend_binding_t* binding, const data_model_tag_t* tag);
-static void format_current_value(char* destination, size_t destination_size,
-                                 const data_model_tag_t* tag, double value);
+static void update_analysis(trend_binding_t* binding, const data_model_tag_t* tag);
+static void format_current_value(char* destination, size_t destination_size, const data_model_tag_t* tag, double value);
 static void copy_display_unit(char* destination, size_t destination_size, const char* source);
 
-/** Return true for data types that can be represented as a continuous trend. */
 static bool tag_is_numeric(const data_model_tag_t* tag)
 {
     return tag != NULL && tag->readable &&
@@ -52,7 +61,6 @@ static bool tag_is_numeric(const data_model_tag_t* tag)
             tag->data_type == DATA_MODEL_TYPE_DOUBLE);
 }
 
-/** Apply the same quiet surface treatment used by the generated HMI. */
 static void style_card(lv_obj_t* card)
 {
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
@@ -60,21 +68,21 @@ static void style_card(lv_obj_t* card)
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_color(card, lv_color_hex(TRENDS_COLOR_BORDER), LV_PART_MAIN);
     lv_obj_set_style_border_width(card, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(card, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(card, 20, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(card, 0, LV_PART_MAIN);
 }
 
-/** Add the full-width title row and keep its count aligned with other pages. */
 static void create_heading(lv_obj_t* parent, size_t visible_count, size_t total_count)
 {
     lv_obj_t* heading = lv_obj_create(parent);
     lv_obj_remove_style_all(heading);
-    lv_obj_set_size(heading, lv_pct(100), 48);
+    lv_obj_set_size(heading, lv_pct(100), 52);
     lv_obj_clear_flag(heading, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t* accent = lv_obj_create(heading);
     lv_obj_remove_style_all(accent);
-    lv_obj_set_size(accent, 5, 28);
+    lv_obj_set_size(accent, 5, 30);
     lv_obj_set_style_radius(accent, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     lv_obj_set_style_bg_color(accent, lv_color_hex(TRENDS_COLOR_ACCENT), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(accent, LV_OPA_COVER, LV_PART_MAIN);
@@ -83,15 +91,15 @@ static void create_heading(lv_obj_t* parent, size_t visible_count, size_t total_
     lv_obj_t* title = lv_label_create(heading);
     lv_label_set_text(title, "Live trends");
     lv_obj_set_style_text_color(title, lv_color_hex(TRENDS_COLOR_TEXT_PRIMARY), LV_PART_MAIN);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_24, LV_PART_MAIN);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_26, LV_PART_MAIN);
     lv_obj_align(title, LV_ALIGN_LEFT_MID, 24, 0);
 
-    char detail_text[48];
+    char detail_text[64];
     if (visible_count < total_count) {
-        snprintf(detail_text, sizeof(detail_text), "%u of %u signals",
-                 (unsigned)visible_count, (unsigned)total_count);
+        snprintf(detail_text, sizeof(detail_text), "%u of %u signals  |  live", (unsigned)visible_count,
+                 (unsigned)total_count);
     } else {
-        snprintf(detail_text, sizeof(detail_text), "%u signals", (unsigned)total_count);
+        snprintf(detail_text, sizeof(detail_text), "%u signals  |  live", (unsigned)total_count);
     }
     lv_obj_t* detail = lv_label_create(heading);
     lv_label_set_text(detail, detail_text);
@@ -100,7 +108,6 @@ static void create_heading(lv_obj_t* parent, size_t visible_count, size_t total_
     lv_obj_align(detail, LV_ALIGN_RIGHT_MID, 0, 1);
 }
 
-/** Add a neutral empty state when the server exposes no numeric values. */
 static void create_empty_state(lv_obj_t* parent)
 {
     lv_obj_t* card = lv_obj_create(parent);
@@ -129,16 +136,15 @@ static void create_empty_state(lv_obj_t* parent)
     lv_obj_align(detail, LV_ALIGN_LEFT_MID, 40, 18);
 }
 
-/** Create one self-contained chart card for a discovered tag. */
 static void create_chart_card(trends_context_t* context, const data_model_tag_t* tag)
 {
     trend_binding_t* binding = &context->bindings[context->binding_count++];
-    binding->tag_index = tag->index;
+    binding->tag_index       = tag->index;
 
     lv_obj_t* card = lv_obj_create(context->root);
-    lv_obj_set_size(card, 468, 218);
+    lv_obj_set_size(card, 468, 240);
     style_card(card);
-    lv_obj_set_style_pad_all(card, 18, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(card, 16, LV_PART_MAIN);
 
     data_model_equipment_t equipment;
     const char* equipment_name = "Unassigned equipment";
@@ -148,8 +154,8 @@ static void create_chart_card(trends_context_t* context, const data_model_tag_t*
     lv_obj_t* equipment_label = lv_label_create(card);
     lv_label_set_text(equipment_label, equipment_name);
     lv_label_set_long_mode(equipment_label, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(equipment_label, 260);
-    lv_obj_set_style_text_color(equipment_label, lv_color_hex(TRENDS_COLOR_ACCENT_SOFT), LV_PART_MAIN);
+    lv_obj_set_width(equipment_label, 270);
+    lv_obj_set_style_text_color(equipment_label, lv_color_hex(TRENDS_COLOR_ACCENT), LV_PART_MAIN);
     lv_obj_set_style_text_font(equipment_label, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_align(equipment_label, LV_ALIGN_TOP_LEFT, 0, 0);
 
@@ -157,21 +163,35 @@ static void create_chart_card(trends_context_t* context, const data_model_tag_t*
     lv_obj_t* name_label = lv_label_create(card);
     lv_label_set_text(name_label, tag_name);
     lv_label_set_long_mode(name_label, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(name_label, 260);
+    lv_obj_set_width(name_label, 270);
     lv_obj_set_style_text_color(name_label, lv_color_hex(TRENDS_COLOR_TEXT_PRIMARY), LV_PART_MAIN);
-    lv_obj_set_style_text_font(name_label, &lv_font_montserrat_18, LV_PART_MAIN);
+    lv_obj_set_style_text_font(name_label, &lv_font_montserrat_20, LV_PART_MAIN);
     lv_obj_align(name_label, LV_ALIGN_TOP_LEFT, 0, 22);
 
     binding->value_label = lv_label_create(card);
     lv_label_set_text(binding->value_label, "No value");
-    lv_obj_set_width(binding->value_label, 140);
+    lv_obj_set_width(binding->value_label, 160);
     lv_obj_set_style_text_align(binding->value_label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
     lv_obj_set_style_text_color(binding->value_label, lv_color_hex(TRENDS_COLOR_ACCENT_SOFT), LV_PART_MAIN);
-    lv_obj_set_style_text_font(binding->value_label, &lv_font_montserrat_22, LV_PART_MAIN);
+    lv_obj_set_style_text_font(binding->value_label, &lv_font_montserrat_24, LV_PART_MAIN);
     lv_obj_align(binding->value_label, LV_ALIGN_TOP_RIGHT, 0, 20);
 
+    binding->analysis_dot = lv_obj_create(card);
+    lv_obj_remove_style_all(binding->analysis_dot);
+    lv_obj_set_size(binding->analysis_dot, 9, 9);
+    lv_obj_set_style_radius(binding->analysis_dot, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(binding->analysis_dot, lv_color_hex(TRENDS_COLOR_ACCENT), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(binding->analysis_dot, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_align(binding->analysis_dot, LV_ALIGN_TOP_LEFT, 0, 55);
+
+    binding->analysis_label = lv_label_create(card);
+    lv_label_set_text(binding->analysis_label, "Live window  |  collecting history");
+    lv_obj_set_style_text_color(binding->analysis_label, lv_color_hex(TRENDS_COLOR_TEXT_SECONDARY), LV_PART_MAIN);
+    lv_obj_set_style_text_font(binding->analysis_label, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(binding->analysis_label, LV_ALIGN_TOP_LEFT, 17, 50);
+
     binding->chart = lv_chart_create(card);
-    lv_obj_set_size(binding->chart, 432, 126);
+    lv_obj_set_size(binding->chart, lv_pct(100), 146);
     lv_obj_align(binding->chart, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_chart_set_type(binding->chart, LV_CHART_TYPE_LINE);
     lv_chart_set_point_count(binding->chart, TRENDS_POINT_COUNT);
@@ -180,12 +200,12 @@ static void create_chart_card(trends_context_t* context, const data_model_tag_t*
     lv_obj_set_style_bg_opa(binding->chart, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(binding->chart, 0, LV_PART_MAIN);
     lv_obj_set_style_line_color(binding->chart, lv_color_hex(TRENDS_COLOR_BORDER), LV_PART_MAIN);
+    lv_obj_set_style_line_opa(binding->chart, LV_OPA_70, LV_PART_MAIN);
     lv_obj_set_style_line_width(binding->chart, 1, LV_PART_MAIN);
     lv_obj_set_style_line_color(binding->chart, lv_color_hex(TRENDS_COLOR_ACCENT), LV_PART_ITEMS);
     lv_obj_set_style_line_width(binding->chart, 3, LV_PART_ITEMS);
     lv_obj_set_style_size(binding->chart, 0, LV_PART_INDICATOR);
-    binding->series = lv_chart_add_series(binding->chart, lv_color_hex(TRENDS_COLOR_ACCENT),
-                                           LV_CHART_AXIS_PRIMARY_Y);
+    binding->series = lv_chart_add_series(binding->chart, lv_color_hex(TRENDS_COLOR_ACCENT), LV_CHART_AXIS_PRIMARY_Y);
     lv_chart_set_all_value(binding->chart, binding->series, LV_CHART_POINT_NONE);
 }
 
@@ -199,7 +219,7 @@ lv_obj_t* trends_create(lv_obj_t* parent, data_model_t* data_model)
         return NULL;
     }
     context->data_model = data_model;
-    context->root = lv_obj_create(parent);
+    context->root       = lv_obj_create(parent);
     if (context->root == NULL) {
         free(context);
         return NULL;
@@ -208,13 +228,13 @@ lv_obj_t* trends_create(lv_obj_t* parent, data_model_t* data_model)
     lv_obj_set_size(context->root, lv_pct(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(context->root, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(context->root, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-    lv_obj_set_style_pad_row(context->root, 16, LV_PART_MAIN);
-    lv_obj_set_style_pad_column(context->root, 16, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(context->root, 14, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(context->root, 14, LV_PART_MAIN);
     lv_obj_clear_flag(context->root, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(context->root, root_deleted_event, LV_EVENT_DELETE, context);
 
     size_t numeric_count = 0;
-    size_t tag_count = data_model_tag_count(data_model);
+    size_t tag_count     = data_model_tag_count(data_model);
     for (size_t tag_index = 0; tag_index < tag_count; ++tag_index) {
         data_model_tag_t tag;
         if (! data_model_get_tag(data_model, tag_index, &tag) || ! tag_is_numeric(&tag)) {
@@ -226,10 +246,8 @@ lv_obj_t* trends_create(lv_obj_t* parent, data_model_t* data_model)
         }
     }
 
-    /* Move the heading before cards after counts are known. */
     create_heading(context->root, context->binding_count, numeric_count);
     lv_obj_move_to_index(lv_obj_get_child(context->root, context->binding_count), 0);
-
     if (context->binding_count == 0) {
         create_empty_state(context->root);
         return context->root;
@@ -265,9 +283,8 @@ static bool tag_numeric_value(const data_model_tag_t* tag, double* value_out)
     if (tag == NULL || value_out == NULL || ! tag->value_valid || ! tag_is_numeric(tag)) {
         return false;
     }
-    double value = tag->data_type == DATA_MODEL_TYPE_INTEGER
-                       ? (double)tag->value.integer_value
-                       : tag->value.numeric_value;
+    double value =
+        tag->data_type == DATA_MODEL_TYPE_INTEGER ? (double)tag->value.integer_value : tag->value.numeric_value;
     if (! isfinite(value)) {
         return false;
     }
@@ -281,15 +298,12 @@ static void sample_binding(trends_context_t* context, trend_binding_t* binding)
     if (! data_model_get_tag(context->data_model, binding->tag_index, &tag)) {
         return;
     }
-
-    memmove(&binding->samples[0], &binding->samples[1],
-            (TRENDS_POINT_COUNT - 1) * sizeof(binding->samples[0]));
+    memmove(&binding->samples[0], &binding->samples[1], (TRENDS_POINT_COUNT - 1) * sizeof(binding->samples[0]));
     memmove(&binding->sample_valid[0], &binding->sample_valid[1],
             (TRENDS_POINT_COUNT - 1) * sizeof(binding->sample_valid[0]));
-
-    double value = 0.0;
-    bool valid = tag_numeric_value(&tag, &value);
-    binding->samples[TRENDS_POINT_COUNT - 1] = value;
+    double value                                  = 0.0;
+    bool valid                                    = tag_numeric_value(&tag, &value);
+    binding->samples[TRENDS_POINT_COUNT - 1]      = value;
     binding->sample_valid[TRENDS_POINT_COUNT - 1] = valid;
     if (valid) {
         char value_text[64];
@@ -301,29 +315,31 @@ static void sample_binding(trends_context_t* context, trend_binding_t* binding)
         lv_obj_set_style_text_color(binding->value_label, lv_color_hex(TRENDS_COLOR_TEXT_SECONDARY), LV_PART_MAIN);
     }
     update_chart_points(binding, &tag);
+    update_analysis(binding, &tag);
 }
 
 static void update_chart_points(trend_binding_t* binding, const data_model_tag_t* tag)
 {
-    double minimum = 0.0;
-    double maximum = 0.0;
+    double minimum   = 0.0;
+    double maximum   = 0.0;
     bool range_valid = tag->has_minimum && tag->has_maximum && tag->maximum > tag->minimum;
     if (range_valid) {
         minimum = tag->minimum;
         maximum = tag->maximum;
     } else {
         for (size_t index = 0; index < TRENDS_POINT_COUNT; ++index) {
-            if (! binding->sample_valid[index]) {
+            if (! binding->sample_valid[index])
                 continue;
-            }
             double sample = binding->samples[index];
             if (! range_valid) {
-                minimum = sample;
-                maximum = sample;
+                minimum     = sample;
+                maximum     = sample;
                 range_valid = true;
             } else {
-                if (sample < minimum) minimum = sample;
-                if (sample > maximum) maximum = sample;
+                if (sample < minimum)
+                    minimum = sample;
+                if (sample > maximum)
+                    maximum = sample;
             }
         }
     }
@@ -340,14 +356,15 @@ static void update_chart_points(trend_binding_t* binding, const data_model_tag_t
         minimum -= padding;
         maximum += padding;
     }
-
     double span = maximum - minimum;
     for (size_t index = 0; index < TRENDS_POINT_COUNT; ++index) {
         lv_coord_t chart_value = LV_CHART_POINT_NONE;
         if (binding->sample_valid[index]) {
             double normalized = (binding->samples[index] - minimum) * 100.0 / span;
-            if (normalized < 0.0) normalized = 0.0;
-            if (normalized > 100.0) normalized = 100.0;
+            if (normalized < 0.0)
+                normalized = 0.0;
+            if (normalized > 100.0)
+                normalized = 100.0;
             chart_value = (lv_coord_t)lround(normalized);
         }
         lv_chart_set_value_by_id(binding->chart, binding->series, (uint16_t)index, chart_value);
@@ -355,15 +372,74 @@ static void update_chart_points(trend_binding_t* binding, const data_model_tag_t
     lv_chart_refresh(binding->chart);
 }
 
-static void format_current_value(char* destination, size_t destination_size,
-                                 const data_model_tag_t* tag, double value)
+static void update_analysis(trend_binding_t* binding, const data_model_tag_t* tag)
+{
+    size_t first_index = TRENDS_POINT_COUNT;
+    size_t last_index  = TRENDS_POINT_COUNT;
+    size_t valid_count = 0;
+    double minimum     = 0.0;
+    double maximum     = 0.0;
+    for (size_t offset = 0; offset < TRENDS_ANALYSIS_POINTS; ++offset) {
+        size_t index = TRENDS_POINT_COUNT - TRENDS_ANALYSIS_POINTS + offset;
+        if (! binding->sample_valid[index])
+            continue;
+        double sample = binding->samples[index];
+        if (valid_count == 0) {
+            first_index = index;
+            minimum     = sample;
+            maximum     = sample;
+        } else {
+            if (sample < minimum)
+                minimum = sample;
+            if (sample > maximum)
+                maximum = sample;
+        }
+        last_index = index;
+        valid_count++;
+    }
+    if (valid_count < 4 || first_index == TRENDS_POINT_COUNT || last_index == TRENDS_POINT_COUNT) {
+        lv_label_set_text(binding->analysis_label, "Live window  |  collecting history");
+        lv_obj_set_style_bg_color(binding->analysis_dot, lv_color_hex(TRENDS_COLOR_ACCENT), LV_PART_MAIN);
+        return;
+    }
+
+    double first     = binding->samples[first_index];
+    double last      = binding->samples[last_index];
+    double scale     = tag->has_minimum && tag->has_maximum && tag->maximum > tag->minimum ? tag->maximum - tag->minimum
+                                                                                           : fmax(fabs(last), 1.0);
+    double slope     = (last - first) / scale;
+    double variation = (maximum - minimum) / scale;
+    const char* description = "stable";
+    lv_color_t color        = lv_color_hex(TRENDS_COLOR_SUCCESS);
+    if (variation > 0.20) {
+        description = "fluctuating";
+        color       = lv_color_hex(TRENDS_COLOR_WARNING);
+    } else if (slope > 0.10) {
+        description = "rising";
+        color       = lv_color_hex(TRENDS_COLOR_WARNING);
+    } else if (slope > 0.035) {
+        description = "rising slowly";
+        color       = lv_color_hex(TRENDS_COLOR_ACCENT);
+    } else if (slope < -0.10) {
+        description = "falling";
+        color       = lv_color_hex(TRENDS_COLOR_WARNING);
+    } else if (slope < -0.035) {
+        description = "falling slowly";
+        color       = lv_color_hex(TRENDS_COLOR_ACCENT);
+    }
+    char text[64];
+    snprintf(text, sizeof(text), "Live window  |  %s", description);
+    lv_label_set_text(binding->analysis_label, text);
+    lv_obj_set_style_bg_color(binding->analysis_dot, color, LV_PART_MAIN);
+}
+
+static void format_current_value(char* destination, size_t destination_size, const data_model_tag_t* tag, double value)
 {
     char unit[DATA_MODEL_UNIT_LENGTH];
     copy_display_unit(unit, sizeof(unit), tag->engineering_unit);
     const char* separator = unit[0] != '\0' ? " " : "";
     if (tag->data_type == DATA_MODEL_TYPE_INTEGER) {
-        snprintf(destination, destination_size, "%lld%s%.20s",
-                 (long long)tag->value.integer_value, separator, unit);
+        snprintf(destination, destination_size, "%lld%s%.20s", (long long)tag->value.integer_value, separator, unit);
     } else if (fabs(value) >= 1000.0) {
         snprintf(destination, destination_size, "%.0f%s%.20s", value, separator, unit);
     } else if (fabs(value) >= 100.0) {
@@ -373,27 +449,24 @@ static void format_current_value(char* destination, size_t destination_size,
     }
 }
 
-/** Replace superscript unit glyphs that are absent from the embedded font. */
 static void copy_display_unit(char* destination, size_t destination_size, const char* source)
 {
-    if (destination == NULL || destination_size == 0) {
+    if (destination == NULL || destination_size == 0)
         return;
-    }
     destination[0] = '\0';
-    if (source == NULL) {
+    if (source == NULL)
         return;
-    }
-    size_t source_index = 0;
+    size_t source_index      = 0;
     size_t destination_index = 0;
     while (source[source_index] != '\0' && destination_index + 1 < destination_size) {
-        unsigned char first_byte = (unsigned char)source[source_index];
-        unsigned char second_byte = (unsigned char)source[source_index + 1];
-        if (first_byte == 0xC2 && (second_byte == 0xB2 || second_byte == 0xB3)) {
-            destination[destination_index++] = second_byte == 0xB2 ? '2' : '3';
+        unsigned char first  = (unsigned char)source[source_index];
+        unsigned char second = (unsigned char)source[source_index + 1];
+        if (first == 0xC2 && (second == 0xB2 || second == 0xB3)) {
+            destination[destination_index++] = second == 0xB2 ? '2' : '3';
             source_index += 2;
-            continue;
+        } else {
+            destination[destination_index++] = source[source_index++];
         }
-        destination[destination_index++] = source[source_index++];
     }
     destination[destination_index] = '\0';
 }
