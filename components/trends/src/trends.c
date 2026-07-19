@@ -42,6 +42,7 @@ static void sample_binding(trends_context_t* context, trend_binding_t* binding);
 static void update_chart_points(trend_binding_t* binding, const data_model_tag_t* tag);
 static void format_current_value(char* destination, size_t destination_size,
                                  const data_model_tag_t* tag, double value);
+static void copy_display_unit(char* destination, size_t destination_size, const char* source);
 
 /** Return true for data types that can be represented as a continuous trend. */
 static bool tag_is_numeric(const data_model_tag_t* tag)
@@ -357,7 +358,8 @@ static void update_chart_points(trend_binding_t* binding, const data_model_tag_t
 static void format_current_value(char* destination, size_t destination_size,
                                  const data_model_tag_t* tag, double value)
 {
-    const char* unit = tag->engineering_unit;
+    char unit[DATA_MODEL_UNIT_LENGTH];
+    copy_display_unit(unit, sizeof(unit), tag->engineering_unit);
     const char* separator = unit[0] != '\0' ? " " : "";
     if (tag->data_type == DATA_MODEL_TYPE_INTEGER) {
         snprintf(destination, destination_size, "%lld%s%.20s",
@@ -369,4 +371,29 @@ static void format_current_value(char* destination, size_t destination_size,
     } else {
         snprintf(destination, destination_size, "%.2f%s%.20s", value, separator, unit);
     }
+}
+
+/** Replace superscript unit glyphs that are absent from the embedded font. */
+static void copy_display_unit(char* destination, size_t destination_size, const char* source)
+{
+    if (destination == NULL || destination_size == 0) {
+        return;
+    }
+    destination[0] = '\0';
+    if (source == NULL) {
+        return;
+    }
+    size_t source_index = 0;
+    size_t destination_index = 0;
+    while (source[source_index] != '\0' && destination_index + 1 < destination_size) {
+        unsigned char first_byte = (unsigned char)source[source_index];
+        unsigned char second_byte = (unsigned char)source[source_index + 1];
+        if (first_byte == 0xC2 && (second_byte == 0xB2 || second_byte == 0xB3)) {
+            destination[destination_index++] = second_byte == 0xB2 ? '2' : '3';
+            source_index += 2;
+            continue;
+        }
+        destination[destination_index++] = source[source_index++];
+    }
+    destination[destination_index] = '\0';
 }

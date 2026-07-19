@@ -148,7 +148,7 @@ static void endpoint_card_event(lv_event_t* event)
     lv_obj_set_size(panel, lv_pct(78), lv_pct(46));
     lv_obj_align(panel, LV_ALIGN_TOP_MID, 0, 8);
     lv_obj_set_style_bg_color(panel, lv_color_black(), LV_PART_MAIN);
-    lv_obj_set_style_border_color(panel, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_border_color(panel, lv_color_hex(0x555555), LV_PART_MAIN);
     lv_obj_set_style_border_width(panel, 2, LV_PART_MAIN);
     lv_obj_set_style_radius(panel, 22, LV_PART_MAIN);
     lv_obj_set_style_pad_all(panel, 20, LV_PART_MAIN);
@@ -181,7 +181,7 @@ static void endpoint_card_event(lv_event_t* event)
     lv_obj_set_size(cancel_button, 130, 54);
     lv_obj_set_style_bg_opa(cancel_button, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(cancel_button, 2, LV_PART_MAIN);
-    lv_obj_set_style_border_color(cancel_button, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_border_color(cancel_button, lv_color_hex(0x555555), LV_PART_MAIN);
     lv_obj_add_event_cb(cancel_button, dialog_cancel_event, LV_EVENT_CLICKED, context);
     lv_obj_t* cancel_label = lv_label_create(cancel_button);
     lv_label_set_text(cancel_label, "Cancel");
@@ -214,7 +214,7 @@ static lv_obj_t* create_endpoint_card(openplc_settings_context_t* context, lv_ob
     lv_obj_set_size(card, lv_pct(100), 105);
     lv_obj_set_style_bg_opa(card, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(card, 2, LV_PART_MAIN);
-    lv_obj_set_style_border_color(card, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x555555), LV_PART_MAIN);
     lv_obj_set_style_border_opa(card, LV_OPA_60, LV_PART_MAIN);
     lv_obj_set_style_radius(card, 20, LV_PART_MAIN);
     lv_obj_set_style_pad_hor(card, 30, LV_PART_MAIN);
@@ -246,7 +246,7 @@ static lv_obj_t* create_portal_card(openplc_settings_context_t* context, lv_obj_
     lv_obj_set_size(card, lv_pct(100), 165);
     lv_obj_set_style_bg_opa(card, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(card, 2, LV_PART_MAIN);
-    lv_obj_set_style_border_color(card, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x555555), LV_PART_MAIN);
     lv_obj_set_style_border_opa(card, LV_OPA_60, LV_PART_MAIN);
     lv_obj_set_style_radius(card, 20, LV_PART_MAIN);
     lv_obj_set_style_pad_all(card, 18, LV_PART_MAIN);
@@ -265,10 +265,10 @@ static lv_obj_t* create_portal_card(openplc_settings_context_t* context, lv_obj_
     lv_obj_align(description, LV_ALIGN_LEFT_MID, 12, 14);
 
     context->portal_info_label = lv_label_create(card);
-    lv_obj_set_width(context->portal_info_label, 220);
+    lv_obj_set_width(context->portal_info_label, 190);
     lv_label_set_long_mode(context->portal_info_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(context->portal_info_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_set_style_text_font(context->portal_info_label, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(context->portal_info_label, &lv_font_montserrat_16, LV_PART_MAIN);
     lv_obj_set_style_text_color(context->portal_info_label, lv_color_white(), LV_PART_MAIN);
 
     context->portal_qr_frame = lv_obj_create(card);
@@ -278,7 +278,7 @@ static lv_obj_t* create_portal_card(openplc_settings_context_t* context, lv_obj_
     lv_obj_set_style_pad_all(context->portal_qr_frame, 6, LV_PART_MAIN);
     lv_obj_align(context->portal_qr_frame, LV_ALIGN_RIGHT_MID, 0, 0);
     lv_obj_align_to(context->portal_info_label, context->portal_qr_frame,
-                    LV_ALIGN_OUT_LEFT_MID, -18, 0);
+                    LV_ALIGN_OUT_LEFT_MID, -6, 0);
 #if LV_USE_QRCODE
     context->portal_qr = lv_qrcode_create(context->portal_qr_frame, 108, lv_color_black(), lv_color_white());
     lv_obj_center(context->portal_qr);
@@ -292,7 +292,7 @@ static lv_obj_t* create_uart_card(lv_obj_t* parent)
     lv_obj_set_size(card, lv_pct(100), 120);
     lv_obj_set_style_bg_opa(card, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(card, 2, LV_PART_MAIN);
-    lv_obj_set_style_border_color(card, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x555555), LV_PART_MAIN);
     lv_obj_set_style_border_opa(card, LV_OPA_60, LV_PART_MAIN);
     lv_obj_set_style_radius(card, 20, LV_PART_MAIN);
     lv_obj_set_style_pad_hor(card, 30, LV_PART_MAIN);
@@ -343,7 +343,7 @@ static void refresh_portal(openplc_settings_context_t* context)
      * updating the text so its visual centre stays level with the QR code. */
     lv_obj_update_layout(context->portal_info_label);
     lv_obj_align_to(context->portal_info_label, context->portal_qr_frame,
-                    LV_ALIGN_OUT_LEFT_MID, -18, 0);
+                    LV_ALIGN_OUT_LEFT_MID, -6, 0);
 }
 
 static void portal_timer_callback(lv_timer_t* timer)

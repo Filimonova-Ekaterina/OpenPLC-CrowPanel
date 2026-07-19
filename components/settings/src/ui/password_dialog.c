@@ -55,7 +55,7 @@ void password_dialog_create(lv_obj_t* parent, const char* msg)
     lv_obj_set_style_bg_color(cont, lv_color_hex(0x1A1A1A), 0);
     lv_obj_set_style_bg_opa(cont, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(cont, 2, 0);
-    lv_obj_set_style_border_color(cont, lv_color_white(), 0);
+    lv_obj_set_style_border_color(cont, lv_color_hex(0x555555), 0);
     lv_obj_set_style_radius(cont, 16, 0);
     lv_obj_clear_flag(cont, LV_OBJ_FLAG_CLICKABLE);
 
@@ -97,7 +97,7 @@ void password_dialog_create(lv_obj_t* parent, const char* msg)
     lv_obj_set_width(cancel_btn, 100);
     lv_obj_set_style_bg_opa(cancel_btn, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(cancel_btn, 2, 0);
-    lv_obj_set_style_border_color(cancel_btn, lv_color_white(), 0);
+    lv_obj_set_style_border_color(cancel_btn, lv_color_hex(0x555555), 0);
     lv_obj_set_style_text_color(cancel_label, lv_color_white(), 0);
     lv_obj_add_event_cb(cancel_btn, cancel_btn_event_cb, LV_EVENT_CLICKED, dialog);
 
@@ -108,7 +108,7 @@ void password_dialog_create(lv_obj_t* parent, const char* msg)
     lv_obj_set_width(confirm_btn, 100);
     lv_obj_set_style_bg_opa(confirm_btn, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(confirm_btn, 2, 0);
-    lv_obj_set_style_border_color(confirm_btn, lv_color_white(), 0);
+    lv_obj_set_style_border_color(confirm_btn, lv_color_hex(0x555555), 0);
     lv_obj_set_style_text_color(confirm_label, lv_color_white(), 0);
     lv_obj_add_event_cb(confirm_btn, confirm_btn_event_cb, LV_EVENT_CLICKED, dialog);
 

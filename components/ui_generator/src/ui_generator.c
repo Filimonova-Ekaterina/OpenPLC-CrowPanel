@@ -18,6 +18,9 @@
 #define UI_NUMERIC_SCALE      100.0
 #define UI_HUMAN_NAME_LENGTH  128
 #define UI_BOOLEAN_WRITE_HOLD_MS 2000
+#define UI_NUMERIC_CARD_WIDTH 292
+#define UI_NUMERIC_BAR_WIDTH  258
+#define UI_RUNTIME_SEGMENT_INTERVAL_MS 500
 #define SETTINGS_SECTION_COUNT 3
 
 #define UI_COLOR_BACKGROUND       0x080808
@@ -48,8 +51,17 @@ typedef enum
     GENERATED_WIDGET_BOOLEAN_SWITCH,
     GENERATED_WIDGET_NUMERIC_BAR,
     GENERATED_WIDGET_NUMERIC_SLIDER,
+    GENERATED_WIDGET_RUNTIME_COUNTER,
     GENERATED_WIDGET_TEXT,
 } generated_widget_type_t;
+
+typedef enum
+{
+    EQUIPMENT_WIDGET_MEASUREMENT,
+    EQUIPMENT_WIDGET_STATUS,
+    EQUIPMENT_WIDGET_COMMAND,
+    EQUIPMENT_WIDGET_GROUP_COUNT,
+} equipment_widget_group_t;
 
 typedef struct
 {
@@ -58,6 +70,15 @@ typedef struct
     generated_widget_type_t widget_type;
     lv_obj_t* value_label;
     lv_obj_t* visual_object;
+    lv_obj_t* card;
+    lv_obj_t* indicator_core;
+    bool displayed_boolean_valid;
+    bool displayed_boolean_value;
+    bool runtime_activity_initialized;
+    bool runtime_activity_known;
+    bool runtime_activity_running;
+    uint8_t runtime_activity_segments;
+    uint32_t runtime_activity_started_tick;
     bool updating_from_model;
     bool boolean_write_pending;
     bool pending_boolean_value;
@@ -123,7 +144,10 @@ static void create_equipment_section(ui_generator_t* generator, lv_obj_t* page,
 static size_t create_controls_section(ui_generator_t* generator, lv_obj_t* page,
                                       const data_model_equipment_t* equipment);
 static void create_tag_widget(ui_generator_t* generator, lv_obj_t* parent, const data_model_tag_t* tag);
+static equipment_widget_group_t equipment_widget_group(const data_model_tag_t* tag);
+static lv_obj_t* create_widget_group_container(lv_obj_t* parent);
 static void update_widget(generated_widget_binding_t* binding, const data_model_tag_t* tag);
+static void update_runtime_activity(generated_widget_binding_t* binding, const data_model_tag_t* tag);
 static void boolean_switch_event(lv_event_t* event);
 static void numeric_slider_event(lv_event_t* event);
 static void open_settings_event(lv_event_t* event);
@@ -319,10 +343,17 @@ static void rebuild_interface(ui_generator_t* generator)
     lv_obj_t* equipment_page = navigation_add_page(generator->navigation, "Equipment");
     style_page_as_grid(equipment_page);
     size_t equipment_count = data_model_equipment_count(generator->data_model);
-    for (size_t equipment_index = 0; equipment_index < equipment_count; ++equipment_index) {
-        data_model_equipment_t equipment;
-        if (data_model_get_equipment(generator->data_model, equipment_index, &equipment)) {
-            create_equipment_section(generator, equipment_page, &equipment);
+    if (equipment_count == 0) {
+        create_section_heading(equipment_page, "Equipment", "OPC UA discovery");
+        create_empty_state(equipment_page, "Waiting for equipment",
+                           "Equipment appears automatically after OPC UA discovery completes",
+                           lv_color_hex(UI_COLOR_ACCENT));
+    } else {
+        for (size_t equipment_index = 0; equipment_index < equipment_count; ++equipment_index) {
+            data_model_equipment_t equipment;
+            if (data_model_get_equipment(generator->data_model, equipment_index, &equipment)) {
+                create_equipment_section(generator, equipment_page, &equipment);
+            }
         }
     }
 
@@ -415,74 +446,6 @@ static void create_overview(ui_generator_t* generator, lv_obj_t* page)
     generator->overview_alarm_value =
         create_summary_card(command_row, "ACTIVE ALARMS", "0", lv_color_hex(UI_COLOR_DANGER));
 
-    create_section_heading(page, "Equipment composition", "Discovered from OPC UA");
-    for (size_t equipment_index = 0; equipment_index < equipment_count; ++equipment_index) {
-        data_model_equipment_t equipment;
-        if (!data_model_get_equipment(generator->data_model, equipment_index, &equipment)) {
-            continue;
-        }
-        char group_name[UI_HUMAN_NAME_LENGTH];
-        copy_equipment_group_name(group_name, sizeof(group_name), &equipment);
-        bool group_already_added = false;
-        for (size_t prior_index = 0; prior_index < equipment_index; ++prior_index) {
-            data_model_equipment_t prior_equipment;
-            char prior_group_name[UI_HUMAN_NAME_LENGTH];
-            if (data_model_get_equipment(generator->data_model, prior_index, &prior_equipment)) {
-                copy_equipment_group_name(prior_group_name, sizeof(prior_group_name), &prior_equipment);
-                if (strcmp(group_name, prior_group_name) == 0) {
-                    group_already_added = true;
-                    break;
-                }
-            }
-        }
-        if (group_already_added) {
-            continue;
-        }
-
-        size_t group_count = 0;
-        for (size_t candidate_index = equipment_index; candidate_index < equipment_count; ++candidate_index) {
-            data_model_equipment_t candidate;
-            char candidate_group_name[UI_HUMAN_NAME_LENGTH];
-            if (data_model_get_equipment(generator->data_model, candidate_index, &candidate)) {
-                copy_equipment_group_name(candidate_group_name, sizeof(candidate_group_name), &candidate);
-                if (strcmp(group_name, candidate_group_name) == 0) {
-                    group_count++;
-                }
-            }
-        }
-
-        lv_obj_t* group_card = lv_obj_create(page);
-        lv_obj_remove_style_all(group_card);
-        lv_obj_set_size(group_card, 310, 70);
-        lv_obj_clear_flag(group_card, LV_OBJ_FLAG_SCROLLABLE);
-
-        lv_obj_t* group_label = lv_label_create(group_card);
-        lv_label_set_text(group_label, group_name);
-        lv_label_set_long_mode(group_label, LV_LABEL_LONG_DOT);
-        lv_obj_set_width(group_label, 242);
-        lv_obj_set_style_text_color(group_label, lv_color_hex(UI_COLOR_TEXT_PRIMARY), LV_PART_MAIN);
-        lv_obj_set_style_text_font(group_label, &lv_font_montserrat_22, LV_PART_MAIN);
-        lv_obj_align(group_label, LV_ALIGN_LEFT_MID, 64, 0);
-
-        lv_obj_t* count_cell = lv_obj_create(group_card);
-        lv_obj_set_size(count_cell, 48, 48);
-        lv_obj_clear_flag(count_cell, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_bg_color(count_cell, lv_color_hex(UI_COLOR_SURFACE_RAISED), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(count_cell, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_border_color(count_cell, lv_color_hex(UI_COLOR_ACCENT), LV_PART_MAIN);
-        lv_obj_set_style_border_width(count_cell, 2, LV_PART_MAIN);
-        lv_obj_set_style_radius(count_cell, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-        lv_obj_set_style_pad_all(count_cell, 0, LV_PART_MAIN);
-        lv_obj_align(count_cell, LV_ALIGN_LEFT_MID, 0, 0);
-        lv_obj_t* count_label = lv_label_create(count_cell);
-        char count_text[16];
-        snprintf(count_text, sizeof(count_text), "%u", (unsigned)group_count);
-        lv_label_set_text(count_label, count_text);
-        lv_obj_set_style_text_color(count_label, lv_color_hex(UI_COLOR_ACCENT_SOFT), LV_PART_MAIN);
-        lv_obj_set_style_text_font(count_label, &lv_font_montserrat_22, LV_PART_MAIN);
-        lv_obj_center(count_label);
-    }
-
     create_section_heading(page, "Live equipment status", "Semantic status signals");
 
     generator->overview_equipment = calloc(equipment_count, sizeof(*generator->overview_equipment));
@@ -550,6 +513,74 @@ static void create_overview(ui_generator_t* generator, lv_obj_t* page)
     if (generator->overview_equipment_count == 0) {
         create_empty_state(page, "No semantic status signals",
                            "Equipment is available on the Equipment page", lv_color_hex(UI_COLOR_ACCENT));
+    }
+
+    create_section_heading(page, "Equipment composition", "Discovered from OPC UA");
+    for (size_t equipment_index = 0; equipment_index < equipment_count; ++equipment_index) {
+        data_model_equipment_t equipment;
+        if (!data_model_get_equipment(generator->data_model, equipment_index, &equipment)) {
+            continue;
+        }
+        char group_name[UI_HUMAN_NAME_LENGTH];
+        copy_equipment_group_name(group_name, sizeof(group_name), &equipment);
+        bool group_already_added = false;
+        for (size_t prior_index = 0; prior_index < equipment_index; ++prior_index) {
+            data_model_equipment_t prior_equipment;
+            char prior_group_name[UI_HUMAN_NAME_LENGTH];
+            if (data_model_get_equipment(generator->data_model, prior_index, &prior_equipment)) {
+                copy_equipment_group_name(prior_group_name, sizeof(prior_group_name), &prior_equipment);
+                if (strcmp(group_name, prior_group_name) == 0) {
+                    group_already_added = true;
+                    break;
+                }
+            }
+        }
+        if (group_already_added) {
+            continue;
+        }
+
+        size_t group_count = 0;
+        for (size_t candidate_index = equipment_index; candidate_index < equipment_count; ++candidate_index) {
+            data_model_equipment_t candidate;
+            char candidate_group_name[UI_HUMAN_NAME_LENGTH];
+            if (data_model_get_equipment(generator->data_model, candidate_index, &candidate)) {
+                copy_equipment_group_name(candidate_group_name, sizeof(candidate_group_name), &candidate);
+                if (strcmp(group_name, candidate_group_name) == 0) {
+                    group_count++;
+                }
+            }
+        }
+
+        lv_obj_t* group_card = lv_obj_create(page);
+        lv_obj_remove_style_all(group_card);
+        lv_obj_set_size(group_card, 310, 70);
+        lv_obj_clear_flag(group_card, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t* group_label = lv_label_create(group_card);
+        lv_label_set_text(group_label, group_name);
+        lv_label_set_long_mode(group_label, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(group_label, 242);
+        lv_obj_set_style_text_color(group_label, lv_color_hex(UI_COLOR_TEXT_PRIMARY), LV_PART_MAIN);
+        lv_obj_set_style_text_font(group_label, &lv_font_montserrat_22, LV_PART_MAIN);
+        lv_obj_align(group_label, LV_ALIGN_LEFT_MID, 64, 0);
+
+        lv_obj_t* count_cell = lv_obj_create(group_card);
+        lv_obj_set_size(count_cell, 48, 48);
+        lv_obj_clear_flag(count_cell, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_color(count_cell, lv_color_hex(UI_COLOR_SURFACE_RAISED), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(count_cell, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_border_color(count_cell, lv_color_hex(UI_COLOR_ACCENT), LV_PART_MAIN);
+        lv_obj_set_style_border_width(count_cell, 2, LV_PART_MAIN);
+        lv_obj_set_style_radius(count_cell, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(count_cell, 0, LV_PART_MAIN);
+        lv_obj_align(count_cell, LV_ALIGN_LEFT_MID, 0, 0);
+        lv_obj_t* count_label = lv_label_create(count_cell);
+        char count_text[16];
+        snprintf(count_text, sizeof(count_text), "%u", (unsigned)group_count);
+        lv_label_set_text(count_label, count_text);
+        lv_obj_set_style_text_color(count_label, lv_color_hex(UI_COLOR_ACCENT_SOFT), LV_PART_MAIN);
+        lv_obj_set_style_text_font(count_label, &lv_font_montserrat_22, LV_PART_MAIN);
+        lv_obj_center(count_label);
     }
     update_overview(generator);
 }
@@ -667,6 +698,13 @@ static void rebuild_alarm_list(ui_generator_t* generator)
         return;
     }
     lv_obj_clean(generator->alarms_host);
+    if (data_model_equipment_count(generator->data_model) == 0) {
+        create_section_heading(generator->alarms_host, "Alarm center", "OPC UA discovery");
+        create_empty_state(generator->alarms_host, "Waiting for equipment",
+                           "Alarm monitoring starts when equipment is discovered",
+                           lv_color_hex(UI_COLOR_ACCENT));
+        return;
+    }
     size_t active_alarm_count = data_model_active_alarm_count(generator->data_model);
     char alarm_count_text[48];
     snprintf(alarm_count_text, sizeof(alarm_count_text), "%u active",
@@ -761,16 +799,61 @@ static void create_equipment_section(ui_generator_t* generator, lv_obj_t* page,
     snprintf(section_detail, sizeof(section_detail), "%u variables", (unsigned)matching_tags);
     create_section_heading(page, human_equipment_name, section_detail);
 
-    for (size_t tag_index = 0; tag_index < tag_count; ++tag_index) {
-        data_model_tag_t tag;
-        if (data_model_get_tag(generator->data_model, tag_index, &tag) && tag.equipment_index == equipment->index) {
-            create_tag_widget(generator, page, &tag);
+    for (unsigned group = 0; group < EQUIPMENT_WIDGET_GROUP_COUNT; ++group) {
+        equipment_widget_group_t group_id = (equipment_widget_group_t)group;
+        size_t group_count = 0;
+        for (size_t tag_index = 0; tag_index < tag_count; ++tag_index) {
+            data_model_tag_t tag;
+            if (data_model_get_tag(generator->data_model, tag_index, &tag) &&
+                tag.equipment_index == equipment->index && equipment_widget_group(&tag) == group_id) {
+                group_count++;
+            }
+        }
+        if (group_count == 0) {
+            continue;
+        }
+        lv_obj_t* group_container = create_widget_group_container(page);
+        for (size_t tag_index = 0; tag_index < tag_count; ++tag_index) {
+            data_model_tag_t tag;
+            if (data_model_get_tag(generator->data_model, tag_index, &tag) &&
+                tag.equipment_index == equipment->index && equipment_widget_group(&tag) == group_id) {
+                create_tag_widget(generator, group_container, &tag);
+            }
         }
     }
     if (matching_tags == 0) {
         create_empty_state(page, "No readable variables", "The OPC UA object contains no supported values",
                            lv_color_hex(UI_COLOR_ACCENT));
     }
+}
+
+/** Classify widgets using protocol metadata instead of tag or equipment names. */
+static equipment_widget_group_t equipment_widget_group(const data_model_tag_t* tag)
+{
+    if (tag == NULL) {
+        return EQUIPMENT_WIDGET_MEASUREMENT;
+    }
+    if (tag->writable) {
+        return EQUIPMENT_WIDGET_COMMAND;
+    }
+    if (tag->data_type == DATA_MODEL_TYPE_BOOLEAN) {
+        return EQUIPMENT_WIDGET_STATUS;
+    }
+    return EQUIPMENT_WIDGET_MEASUREMENT;
+}
+
+/** Keep each semantic group on its own compact flex row without a visible heading. */
+static lv_obj_t* create_widget_group_container(lv_obj_t* parent)
+{
+    lv_obj_t* group = lv_obj_create(parent);
+    lv_obj_remove_style_all(group);
+    lv_obj_set_size(group, lv_pct(97), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(group, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(group, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_column(group, 16, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(group, 16, LV_PART_MAIN);
+    lv_obj_clear_flag(group, LV_OBJ_FLAG_SCROLLABLE);
+    return group;
 }
 
 static size_t create_controls_section(ui_generator_t* generator, lv_obj_t* page,
@@ -818,15 +901,13 @@ static void create_tag_widget(ui_generator_t* generator, lv_obj_t* parent, const
     binding->tag_index = tag->index;
 
     bool is_boolean = tag->data_type == DATA_MODEL_TYPE_BOOLEAN;
+    bool is_runtime_counter = ! tag->writable && strcmp(tag->semantic_role, "runtime") == 0;
     lv_obj_t* card = lv_obj_create(parent);
-    lv_obj_set_size(card, is_boolean ? 228 : 310, is_boolean ? 112 : 156);
+    binding->card = card;
+    lv_obj_set_size(card, is_boolean ? 228 : UI_NUMERIC_CARD_WIDTH, is_boolean ? 112 : 156);
     style_content_card(card,
                        lv_color_hex(tag->writable ? UI_COLOR_SURFACE_RAISED : UI_COLOR_SURFACE), 20);
     lv_obj_set_style_pad_all(card, 16, LV_PART_MAIN);
-    if (tag->writable) {
-        lv_obj_set_style_border_color(card, lv_color_hex(UI_COLOR_ACCENT), LV_PART_MAIN);
-        lv_obj_set_style_border_opa(card, LV_OPA_40, LV_PART_MAIN);
-    }
 
     lv_obj_t* name_label = lv_label_create(card);
     const char* tag_name = tag->display_name[0] != '\0' ? tag->display_name : tag->browse_name;
@@ -867,38 +948,68 @@ static void create_tag_widget(ui_generator_t* generator, lv_obj_t* parent, const
             binding->widget_type   = GENERATED_WIDGET_BOOLEAN_INDICATOR;
             binding->visual_object = lv_obj_create(card);
             lv_obj_remove_style_all(binding->visual_object);
-            lv_obj_set_size(binding->visual_object, 18, 18);
+            lv_obj_set_size(binding->visual_object, 32, 32);
             lv_obj_set_style_radius(binding->visual_object, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-            lv_obj_set_style_bg_opa(binding->visual_object, LV_OPA_COVER, LV_PART_MAIN);
-            lv_obj_align(binding->visual_object, LV_ALIGN_BOTTOM_RIGHT, -4, -2);
+            lv_obj_set_style_border_width(binding->visual_object, 2, LV_PART_MAIN);
+            lv_obj_align(binding->visual_object, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+
+            binding->indicator_core = lv_obj_create(binding->visual_object);
+            lv_obj_remove_style_all(binding->indicator_core);
+            lv_obj_set_size(binding->indicator_core, 10, 10);
+            lv_obj_set_style_radius(binding->indicator_core, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+            lv_obj_center(binding->indicator_core);
         }
     } else if (tag->data_type == DATA_MODEL_TYPE_FLOAT || tag->data_type == DATA_MODEL_TYPE_DOUBLE ||
                tag->data_type == DATA_MODEL_TYPE_INTEGER) {
-        double minimum;
-        double maximum;
-        numeric_range(tag, &minimum, &maximum);
-        if (tag->writable) {
-            binding->widget_type   = GENERATED_WIDGET_NUMERIC_SLIDER;
-            binding->visual_object = lv_slider_create(card);
-            lv_slider_set_range(binding->visual_object, scale_numeric_for_widget(minimum),
-                                scale_numeric_for_widget(maximum));
-            lv_obj_add_event_cb(binding->visual_object, numeric_slider_event, LV_EVENT_RELEASED, binding);
+        if (is_runtime_counter) {
+            binding->widget_type = GENERATED_WIDGET_RUNTIME_COUNTER;
+            binding->visual_object = lv_obj_create(card);
+            lv_obj_remove_style_all(binding->visual_object);
+            lv_obj_set_size(binding->visual_object, UI_NUMERIC_BAR_WIDTH, 18);
+            lv_obj_align(binding->visual_object, LV_ALIGN_CENTER, 0, 11);
+
+            lv_obj_t* activity_icon = lv_label_create(binding->visual_object);
+            lv_label_set_text(activity_icon, LV_SYMBOL_LOOP);
+            lv_obj_set_style_text_color(activity_icon, lv_color_hex(UI_COLOR_ACCENT_SOFT), LV_PART_MAIN);
+            lv_obj_set_style_text_font(activity_icon, &lv_font_montserrat_16, LV_PART_MAIN);
+            lv_obj_align(activity_icon, LV_ALIGN_LEFT_MID, 0, 0);
+
+            for (unsigned segment_index = 0; segment_index < 6; ++segment_index) {
+                lv_obj_t* segment = lv_obj_create(binding->visual_object);
+                lv_obj_remove_style_all(segment);
+                lv_obj_set_size(segment, 30, 6);
+                lv_obj_set_style_radius(segment, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+                lv_obj_set_style_bg_color(segment, lv_color_hex(UI_COLOR_BORDER), LV_PART_MAIN);
+                lv_obj_set_style_bg_opa(segment, LV_OPA_COVER, LV_PART_MAIN);
+                lv_obj_align(segment, LV_ALIGN_LEFT_MID, (lv_coord_t)(30 + segment_index * 37), 0);
+            }
         } else {
-            binding->widget_type   = GENERATED_WIDGET_NUMERIC_BAR;
-            binding->visual_object = lv_bar_create(card);
-            lv_bar_set_range(binding->visual_object, scale_numeric_for_widget(minimum),
-                             scale_numeric_for_widget(maximum));
+            double minimum;
+            double maximum;
+            numeric_range(tag, &minimum, &maximum);
+            if (tag->writable) {
+                binding->widget_type   = GENERATED_WIDGET_NUMERIC_SLIDER;
+                binding->visual_object = lv_slider_create(card);
+                lv_slider_set_range(binding->visual_object, scale_numeric_for_widget(minimum),
+                                    scale_numeric_for_widget(maximum));
+                lv_obj_add_event_cb(binding->visual_object, numeric_slider_event, LV_EVENT_RELEASED, binding);
+            } else {
+                binding->widget_type   = GENERATED_WIDGET_NUMERIC_BAR;
+                binding->visual_object = lv_bar_create(card);
+                lv_bar_set_range(binding->visual_object, scale_numeric_for_widget(minimum),
+                                 scale_numeric_for_widget(maximum));
+            }
+            lv_obj_set_size(binding->visual_object, UI_NUMERIC_BAR_WIDTH, tag->writable ? 22 : 16);
+            lv_obj_set_style_bg_color(binding->visual_object, lv_color_hex(UI_COLOR_BORDER), LV_PART_MAIN);
+            lv_obj_set_style_bg_color(binding->visual_object, lv_color_hex(UI_COLOR_ACCENT), LV_PART_INDICATOR);
+            lv_obj_set_style_radius(binding->visual_object, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+            lv_obj_set_style_radius(binding->visual_object, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
+            if (tag->writable) {
+                lv_obj_set_style_bg_color(binding->visual_object, lv_color_hex(UI_COLOR_TEXT_PRIMARY), LV_PART_KNOB);
+                lv_obj_set_style_pad_all(binding->visual_object, 6, LV_PART_KNOB);
+            }
+            lv_obj_align(binding->visual_object, LV_ALIGN_CENTER, 0, 11);
         }
-        lv_obj_set_size(binding->visual_object, 276, tag->writable ? 22 : 16);
-        lv_obj_set_style_bg_color(binding->visual_object, lv_color_hex(UI_COLOR_BORDER), LV_PART_MAIN);
-        lv_obj_set_style_bg_color(binding->visual_object, lv_color_hex(UI_COLOR_ACCENT), LV_PART_INDICATOR);
-        lv_obj_set_style_radius(binding->visual_object, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-        lv_obj_set_style_radius(binding->visual_object, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
-        if (tag->writable) {
-            lv_obj_set_style_bg_color(binding->visual_object, lv_color_hex(UI_COLOR_TEXT_PRIMARY), LV_PART_KNOB);
-            lv_obj_set_style_pad_all(binding->visual_object, 6, LV_PART_KNOB);
-        }
-        lv_obj_align(binding->visual_object, LV_ALIGN_CENTER, 0, 11);
     } else {
         binding->widget_type = GENERATED_WIDGET_TEXT;
     }
@@ -914,8 +1025,14 @@ static void update_widget(generated_widget_binding_t* binding, const data_model_
 
     binding->updating_from_model = true;
     if (! tag->value_valid) {
-        lv_label_set_text(binding->value_label, "No value");
+        set_label_text_if_changed(binding->value_label, "No value");
         lv_obj_set_style_text_color(binding->value_label, lv_color_hex(UI_COLOR_TEXT_SECONDARY), LV_PART_MAIN);
+        if (binding->displayed_boolean_valid) {
+            lv_obj_set_style_border_color(binding->card, lv_color_hex(UI_COLOR_BORDER), LV_PART_MAIN);
+            lv_obj_set_style_border_width(binding->card, 1, LV_PART_MAIN);
+            lv_obj_set_style_border_opa(binding->card, LV_OPA_COVER, LV_PART_MAIN);
+        }
+        binding->displayed_boolean_valid = false;
         binding->updating_from_model = false;
         return;
     }
@@ -940,17 +1057,33 @@ static void update_widget(generated_widget_binding_t* binding, const data_model_
                 binding->boolean_write_pending = false;
             }
         }
-        lv_label_set_text(binding->value_label, displayed_value ? "ON" : "OFF");
-        lv_color_t state_color = boolean_state_color(tag, displayed_value);
-        lv_obj_set_style_text_color(binding->value_label, state_color, LV_PART_MAIN);
-        if (binding->widget_type == GENERATED_WIDGET_BOOLEAN_INDICATOR) {
-            lv_obj_set_style_bg_color(binding->visual_object, state_color, LV_PART_MAIN);
-        } else if (binding->widget_type == GENERATED_WIDGET_BOOLEAN_SWITCH) {
-            if (displayed_value) {
-                lv_obj_add_state(binding->visual_object, LV_STATE_CHECKED);
-            } else {
-                lv_obj_clear_state(binding->visual_object, LV_STATE_CHECKED);
+        if (! binding->displayed_boolean_valid || binding->displayed_boolean_value != displayed_value) {
+            set_label_text_if_changed(binding->value_label, displayed_value ? "ON" : "OFF");
+            lv_color_t state_color = boolean_state_color(tag, displayed_value);
+            lv_obj_set_style_text_color(binding->value_label, state_color, LV_PART_MAIN);
+            if (binding->widget_type == GENERATED_WIDGET_BOOLEAN_INDICATOR) {
+                lv_obj_set_style_bg_color(binding->visual_object, state_color, LV_PART_MAIN);
+                lv_obj_set_style_bg_opa(binding->visual_object, displayed_value ? LV_OPA_20 : LV_OPA_10,
+                                        LV_PART_MAIN);
+                lv_obj_set_style_border_color(binding->visual_object, state_color, LV_PART_MAIN);
+                lv_obj_set_style_border_opa(binding->visual_object, displayed_value ? LV_OPA_COVER : LV_OPA_50,
+                                            LV_PART_MAIN);
+                lv_obj_set_style_bg_color(binding->indicator_core, state_color, LV_PART_MAIN);
+                lv_obj_set_style_bg_opa(binding->indicator_core, LV_OPA_COVER, LV_PART_MAIN);
+            } else if (binding->widget_type == GENERATED_WIDGET_BOOLEAN_SWITCH) {
+                if (displayed_value) {
+                    lv_obj_add_state(binding->visual_object, LV_STATE_CHECKED);
+                } else {
+                    lv_obj_clear_state(binding->visual_object, LV_STATE_CHECKED);
+                }
             }
+            lv_color_t card_border = displayed_value ? state_color : lv_color_hex(UI_COLOR_BORDER);
+            lv_obj_set_style_border_color(binding->card, card_border, LV_PART_MAIN);
+            lv_obj_set_style_border_width(binding->card, displayed_value ? 2 : 1, LV_PART_MAIN);
+            lv_obj_set_style_border_opa(binding->card, displayed_value ? LV_OPA_60 : LV_OPA_COVER,
+                                        LV_PART_MAIN);
+            binding->displayed_boolean_valid = true;
+            binding->displayed_boolean_value = displayed_value;
         }
         break;
     }
@@ -965,11 +1098,15 @@ static void update_widget(generated_widget_binding_t* binding, const data_model_
             lv_label_set_text(binding->value_label, value_text);
         }
         if (binding->visual_object != NULL) {
-            int32_t scaled_value = scale_numeric_for_widget((double)tag->value.integer_value);
-            if (binding->widget_type == GENERATED_WIDGET_NUMERIC_BAR) {
-                lv_bar_set_value(binding->visual_object, scaled_value, LV_ANIM_OFF);
+            if (binding->widget_type == GENERATED_WIDGET_RUNTIME_COUNTER) {
+                update_runtime_activity(binding, tag);
             } else {
-                lv_slider_set_value(binding->visual_object, scaled_value, LV_ANIM_OFF);
+                int32_t scaled_value = scale_numeric_for_widget((double)tag->value.integer_value);
+                if (binding->widget_type == GENERATED_WIDGET_NUMERIC_BAR) {
+                    lv_bar_set_value(binding->visual_object, scaled_value, LV_ANIM_OFF);
+                } else {
+                    lv_slider_set_value(binding->visual_object, scaled_value, LV_ANIM_OFF);
+                }
             }
         }
         break;
@@ -980,11 +1117,15 @@ static void update_widget(generated_widget_binding_t* binding, const data_model_
         if (!isfinite(tag->value.numeric_value)) {
             break;
         }
-        int32_t scaled_value = scale_numeric_for_widget(tag->value.numeric_value);
-        if (binding->widget_type == GENERATED_WIDGET_NUMERIC_BAR) {
-            lv_bar_set_value(binding->visual_object, scaled_value, LV_ANIM_OFF);
-        } else if (binding->widget_type == GENERATED_WIDGET_NUMERIC_SLIDER) {
-            lv_slider_set_value(binding->visual_object, scaled_value, LV_ANIM_OFF);
+        if (binding->widget_type == GENERATED_WIDGET_RUNTIME_COUNTER) {
+            update_runtime_activity(binding, tag);
+        } else {
+            int32_t scaled_value = scale_numeric_for_widget(tag->value.numeric_value);
+            if (binding->widget_type == GENERATED_WIDGET_NUMERIC_BAR) {
+                lv_bar_set_value(binding->visual_object, scaled_value, LV_ANIM_OFF);
+            } else if (binding->widget_type == GENERATED_WIDGET_NUMERIC_SLIDER) {
+                lv_slider_set_value(binding->visual_object, scaled_value, LV_ANIM_OFF);
+            }
         }
         break;
     }
@@ -1000,6 +1141,64 @@ static void update_widget(generated_widget_binding_t* binding, const data_model_
     binding->updating_from_model = false;
 }
 
+/** Show whether a cumulative runtime counter is currently accumulating, without inventing a lifetime maximum. */
+static void update_runtime_activity(generated_widget_binding_t* binding, const data_model_tag_t* tag)
+{
+    if (binding == NULL || tag == NULL || binding->visual_object == NULL) {
+        return;
+    }
+
+    data_model_tag_t operating_status;
+    bool activity_known = find_equipment_tag_by_role(binding->generator->data_model, tag->equipment_index,
+                                                      "operating_status", &operating_status) &&
+                          operating_status.value_valid;
+    bool activity_running = activity_known && operating_status.value.boolean_value;
+    bool activity_changed = ! binding->runtime_activity_initialized ||
+                            binding->runtime_activity_known != activity_known ||
+                            binding->runtime_activity_running != activity_running;
+    if (activity_changed && activity_running) {
+        binding->runtime_activity_started_tick = lv_tick_get();
+    }
+
+    uint8_t active_segments = 0;
+    if (activity_running) {
+        uint32_t elapsed = lv_tick_elaps(binding->runtime_activity_started_tick);
+        uint32_t completed_segments = elapsed / UI_RUNTIME_SEGMENT_INTERVAL_MS;
+        active_segments = completed_segments < 6 ? (uint8_t)completed_segments : 6;
+    }
+    if (! activity_changed && binding->runtime_activity_segments == active_segments) {
+        return;
+    }
+
+    lv_obj_t* activity_icon = lv_obj_get_child(binding->visual_object, 0);
+    lv_color_t activity_color = activity_running
+                                    ? lv_color_hex(UI_COLOR_ACCENT)
+                                    : (activity_known ? lv_color_hex(UI_COLOR_TEXT_SECONDARY)
+                                                      : lv_color_hex(UI_COLOR_ACCENT_SOFT));
+    if (activity_icon != NULL) {
+        lv_obj_set_style_text_color(activity_icon, activity_color, LV_PART_MAIN);
+    }
+
+    for (unsigned segment_index = 0; segment_index < 6; ++segment_index) {
+        lv_obj_t* segment = lv_obj_get_child(binding->visual_object, (int32_t)segment_index + 1);
+        if (segment == NULL) {
+            continue;
+        }
+        bool segment_active = activity_running && segment_index < active_segments;
+        lv_obj_set_style_bg_color(segment, segment_active || ! activity_known
+                                               ? lv_color_hex(UI_COLOR_ACCENT)
+                                               : lv_color_hex(UI_COLOR_BORDER),
+                                  LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(segment, segment_active ? LV_OPA_COVER
+                                                        : (activity_known ? LV_OPA_COVER : LV_OPA_20),
+                                LV_PART_MAIN);
+    }
+    binding->runtime_activity_initialized = true;
+    binding->runtime_activity_known = activity_known;
+    binding->runtime_activity_running = activity_running;
+    binding->runtime_activity_segments = active_segments;
+}
+
 static void boolean_switch_event(lv_event_t* event)
 {
     generated_widget_binding_t* binding = lv_event_get_user_data(event);
@@ -1008,8 +1207,8 @@ static void boolean_switch_event(lv_event_t* event)
     }
     bool value       = lv_obj_has_state(binding->visual_object, LV_STATE_CHECKED);
     data_model_tag_t command_tag;
-    if (data_model_get_tag(binding->generator->data_model, binding->tag_index, &command_tag) &&
-        strcmp(command_tag.semantic_role, "operating_command") == 0) {
+    bool has_command_tag = data_model_get_tag(binding->generator->data_model, binding->tag_index, &command_tag);
+    if (has_command_tag && strcmp(command_tag.semantic_role, "operating_command") == 0) {
         data_model_tag_t automatic_mode;
         if (find_equipment_tag_by_role(binding->generator->data_model, command_tag.equipment_index,
                                        "automatic_mode", &automatic_mode) && automatic_mode.value_valid &&
@@ -1036,7 +1235,15 @@ static void boolean_switch_event(lv_event_t* event)
     binding->boolean_write_pending = true;
     binding->pending_boolean_value = value;
     binding->pending_write_started = lv_tick_get();
-    lv_label_set_text(binding->value_label, value ? "ON" : "OFF");
+    set_label_text_if_changed(binding->value_label, value ? "ON" : "OFF");
+    lv_color_t state_color = boolean_state_color(has_command_tag ? &command_tag : NULL, value);
+    lv_obj_set_style_text_color(binding->value_label, state_color, LV_PART_MAIN);
+    lv_obj_set_style_border_color(binding->card,
+                                  value ? state_color : lv_color_hex(UI_COLOR_BORDER), LV_PART_MAIN);
+    lv_obj_set_style_border_width(binding->card, value ? 2 : 1, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(binding->card, value ? LV_OPA_60 : LV_OPA_COVER, LV_PART_MAIN);
+    binding->displayed_boolean_valid = true;
+    binding->displayed_boolean_value = value;
 }
 
 static void numeric_slider_event(lv_event_t* event)
@@ -1060,7 +1267,7 @@ static lv_obj_t* create_settings_section_button(lv_obj_t* parent, const char* ti
     lv_obj_set_style_bg_color(button, lv_color_hex(0x111820), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(button, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_width(button, 2, LV_PART_MAIN);
-    lv_obj_set_style_border_color(button, lv_color_hex(0x666666), LV_PART_MAIN);
+    lv_obj_set_style_border_color(button, lv_color_hex(0x555555), LV_PART_MAIN);
     lv_obj_set_style_shadow_width(button, 0, LV_PART_MAIN);
     lv_obj_t* label = lv_label_create(button);
     lv_label_set_text(label, title);
@@ -1126,7 +1333,7 @@ static void open_settings_event(lv_event_t* event)
     lv_obj_set_style_radius(back_button, 18, LV_PART_MAIN);
     lv_obj_set_style_bg_color(back_button, lv_color_hex(0x202020), LV_PART_MAIN);
     lv_obj_set_style_border_width(back_button, 2, LV_PART_MAIN);
-    lv_obj_set_style_border_color(back_button, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_border_color(back_button, lv_color_hex(0x555555), LV_PART_MAIN);
     lv_obj_set_style_shadow_width(back_button, 0, LV_PART_MAIN);
     lv_obj_add_event_cb(back_button, close_settings_event, LV_EVENT_CLICKED, generator);
     lv_obj_t* back_label = lv_label_create(back_button);
@@ -1204,7 +1411,7 @@ static void show_settings_section(ui_generator_t* generator, unsigned selected_s
             lv_obj_add_flag(generator->settings_pages[section], LV_OBJ_FLAG_HIDDEN);
         }
         lv_obj_set_style_border_color(generator->settings_section_buttons[section],
-                                      selected ? lv_color_hex(0x6BC1FF) : lv_color_hex(0x4A4A4A), LV_PART_MAIN);
+                                      selected ? lv_color_hex(0x6BC1FF) : lv_color_hex(0x555555), LV_PART_MAIN);
         lv_obj_set_style_bg_color(generator->settings_section_buttons[section],
                                   selected ? lv_color_hex(0x184F73) : lv_color_hex(0x111820), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(generator->settings_section_buttons[section], LV_OPA_COVER, LV_PART_MAIN);
