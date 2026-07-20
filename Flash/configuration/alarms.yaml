@@ -1,0 +1,10 @@
+alarms:
+  high_temperature_c: 80.0
+  high_temperature_delay_seconds: 5.0
+  high_temperature_severity: 700
+  high_pressure_bar: 9.5
+  high_pressure_severity: 800
+  motor_overload_current_a: 30.0
+  motor_overload_severity: 900
+  sensor_fault_severity: 600
+  sensor_fault_random_seed: 2026

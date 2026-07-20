@@ -165,7 +165,7 @@ static void refresh_timer_callback(lv_timer_t* timer)
     char status_text[128];
     if (state == OPCUA_CLIENT_CONNECTED) {
         snprintf(status_text, sizeof(status_text), "CONNECTED  |  %u objects  |  %u tags",
-                 (unsigned)data_model_equipment_count(generator->data_model),
+                 (unsigned)data_model_object_count(generator->data_model),
                  (unsigned)data_model_tag_count(generator->data_model));
     } else {
         opcua_client_get_status(generator->opcua_client, status_text, sizeof(status_text));
@@ -248,19 +248,19 @@ static void rebuild_interface(ui_generator_t* generator)
                                     "Not enough memory for generated bindings", lv_color_hex(UI_COLOR_WARNING));
     }
 
-    lv_obj_t* trends_page = navigation_add_page(generator->navigation, LV_SYMBOL_CHARGE "  Trends");
-    ui_theme_style_page(trends_page);
-    if (trends_create(trends_page, generator->data_model) == NULL) {
-        ui_theme_create_empty_state(trends_page, "Cannot create trend charts", "Not enough memory for the Trends view",
-                                    lv_color_hex(UI_COLOR_WARNING));
-    }
-
     lv_obj_t* controls_page = navigation_add_page(generator->navigation, LV_SYMBOL_EDIT "  Controls");
     ui_theme_style_page(controls_page);
     generator->controls_view =
         ui_equipment_create(controls_page, generator->data_model, generator->opcua_client, UI_EQUIPMENT_PAGE_CONTROLS);
     if (generator->controls_view == NULL) {
         ui_theme_create_empty_state(controls_page, "Cannot create Controls", "Not enough memory for generated bindings",
+                                    lv_color_hex(UI_COLOR_WARNING));
+    }
+
+    lv_obj_t* trends_page = navigation_add_page(generator->navigation, LV_SYMBOL_CHARGE "  Trends");
+    ui_theme_style_page(trends_page);
+    if (trends_create(trends_page, generator->data_model) == NULL) {
+        ui_theme_create_empty_state(trends_page, "Cannot create trend charts", "Not enough memory for the Trends view",
                                     lv_color_hex(UI_COLOR_WARNING));
     }
 
@@ -273,8 +273,9 @@ static void rebuild_interface(ui_generator_t* generator)
         lv_tabview_set_act(navigation_root(generator->navigation), selected_tab, LV_ANIM_OFF);
     }
 
-    ESP_LOGI(TAG, "Generated UI for %u equipment objects and %u tags",
-             (unsigned)data_model_equipment_count(generator->data_model),
+    ESP_LOGI(TAG, "Generated UI for %u OPC UA objects, %u physical assets, and %u tags",
+             (unsigned)data_model_object_count(generator->data_model),
+             (unsigned)data_model_asset_count(generator->data_model),
              (unsigned)data_model_tag_count(generator->data_model));
 }
 
@@ -284,8 +285,8 @@ static void rebuild_alarm_list(ui_generator_t* generator)
         return;
     }
     lv_obj_clean(generator->alarms_host);
-    size_t equipment_count = data_model_equipment_count(generator->data_model);
-    if (equipment_count == 0) {
+    size_t object_count = data_model_object_count(generator->data_model);
+    if (object_count == 0) {
         ui_theme_create_heading(generator->alarms_host, "Alarm center", "OPC UA discovery");
         ui_theme_create_empty_state(generator->alarms_host, "Waiting for equipment",
                                     "Alarm monitoring starts when equipment is discovered",

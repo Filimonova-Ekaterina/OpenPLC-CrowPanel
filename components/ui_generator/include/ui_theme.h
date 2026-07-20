@@ -57,10 +57,10 @@ void ui_theme_format_tag_value(char* destination, size_t destination_size, const
 bool ui_theme_find_tag_by_role(const data_model_t* model, size_t equipment_index, const char* semantic_role,
                                data_model_tag_t* tag_out);
 
-/** Return a compact semantic monogram with a generic fallback. */
+/** Return a compact built-in icon selected from protocol semantic metadata. */
 const char* ui_theme_tag_icon(const data_model_tag_t* tag);
 
-/** Draw a semantic LVGL icon for a discovered measurement. */
+/** Draw a semantic LVGL icon with a type-based fallback for unknown roles. */
 void ui_theme_create_tag_icon(lv_obj_t* parent, const data_model_tag_t* tag, lv_coord_t size);
 
 /** Map Boolean semantics to a restrained state color. */

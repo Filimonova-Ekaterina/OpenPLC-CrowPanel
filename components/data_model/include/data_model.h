@@ -35,6 +35,26 @@ typedef enum
     DATA_MODEL_TYPE_STRING,
 } data_model_type_t;
 
+/** Semantic role of a discovered OPC UA Object in the generated HMI. */
+typedef enum
+{
+    DATA_MODEL_ENTITY_UNKNOWN = 0,
+    DATA_MODEL_ENTITY_SYSTEM,
+    DATA_MODEL_ENTITY_PROCESS,
+    DATA_MODEL_ENTITY_ACTIVE_EQUIPMENT,
+    DATA_MODEL_ENTITY_PASSIVE_EQUIPMENT,
+    DATA_MODEL_ENTITY_GROUP,
+} data_model_entity_kind_t;
+
+/** Hierarchical OPC UA reference used to reach an Object. */
+typedef enum
+{
+    DATA_MODEL_REFERENCE_UNKNOWN = 0,
+    DATA_MODEL_REFERENCE_ROOT,
+    DATA_MODEL_REFERENCE_ORGANIZES,
+    DATA_MODEL_REFERENCE_COMPONENT,
+} data_model_reference_kind_t;
+
 typedef struct
 {
     bool boolean_value;
@@ -48,8 +68,12 @@ typedef struct
     size_t index;
     size_t parent_index;
     char node_id[DATA_MODEL_NODE_ID_LENGTH];
+    char type_definition_id[DATA_MODEL_NODE_ID_LENGTH];
     char browse_name[DATA_MODEL_NAME_LENGTH];
     char display_name[DATA_MODEL_NAME_LENGTH];
+    data_model_entity_kind_t entity_kind;
+    data_model_reference_kind_t reference_kind;
+    bool entity_kind_explicit;
 } data_model_equipment_t;
 
 typedef struct
@@ -74,6 +98,7 @@ typedef struct
 
 typedef struct
 {
+    char source_node_id[DATA_MODEL_NODE_ID_LENGTH];
     char source_name[DATA_MODEL_NAME_LENGTH];
     char alarm_code[DATA_MODEL_ALARM_CODE_LENGTH];
     char reason[DATA_MODEL_ALARM_REASON_LENGTH];
@@ -124,7 +149,14 @@ void data_model_clear_alarms(data_model_t* model);
 bool data_model_get_active_alarm(const data_model_t* model, size_t active_index, data_model_alarm_t* alarm_out);
 size_t data_model_active_alarm_count(const data_model_t* model);
 
+/** Number of discovered OPC UA Objects, including systems, processes, groups, and assets. */
+size_t data_model_object_count(const data_model_t* model);
+
+/** Compatibility alias; new code should use data_model_object_count or data_model_asset_count. */
 size_t data_model_equipment_count(const data_model_t* model);
+size_t data_model_asset_count(const data_model_t* model);
+size_t data_model_active_equipment_count(const data_model_t* model);
+size_t data_model_passive_equipment_count(const data_model_t* model);
 size_t data_model_tag_count(const data_model_t* model);
 uint32_t data_model_structure_generation(const data_model_t* model);
 uint32_t data_model_value_generation(const data_model_t* model);
@@ -132,6 +164,12 @@ uint32_t data_model_alarm_generation(const data_model_t* model);
 
 /** Human-readable data type name for logs and diagnostics. */
 const char* data_model_type_name(data_model_type_t data_type);
+
+/** Return true for active and passive physical assets, but not systems or process nodes. */
+bool data_model_entity_is_equipment(data_model_entity_kind_t entity_kind);
+
+/** Human-readable entity kind for diagnostics. */
+const char* data_model_entity_kind_name(data_model_entity_kind_t entity_kind);
 
 #ifdef __cplusplus
 }

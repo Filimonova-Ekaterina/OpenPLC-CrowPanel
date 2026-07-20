@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,11 @@ from opcua_server import OpcUaStationServer
 
 
 LOGGER = logging.getLogger(__name__)
-DEFAULT_CONFIGURATION_DIRECTORY = Path(__file__).resolve().parent / "configuration"
+DEFAULT_CONFIGURATION_DIRECTORY = (
+    Path(sys.executable).resolve().parent
+    if getattr(sys, "frozen", False)
+    else Path(__file__).resolve().parent
+) / "configuration"
 
 
 def load_yaml(path: Path) -> dict[str, Any]:

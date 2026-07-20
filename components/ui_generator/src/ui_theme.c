@@ -5,6 +5,116 @@
 #include <string.h>
 
 static const lv_point_t PRESSURE_NEEDLE_POINTS[] = {{0, 8}, {8, 0}};
+static const lv_point_t VIBRATION_WAVE_POINTS[]  = {{0, 8}, {5, 8}, {8, 1}, {13, 15}, {17, 8}, {22, 8}};
+
+typedef enum
+{
+    UI_TAG_ICON_GENERIC,
+    UI_TAG_ICON_TEMPERATURE,
+    UI_TAG_ICON_PRESSURE,
+    UI_TAG_ICON_DEMAND,
+    UI_TAG_ICON_FLOW,
+    UI_TAG_ICON_ELECTRICAL,
+    UI_TAG_ICON_POWER,
+    UI_TAG_ICON_RUNTIME,
+    UI_TAG_ICON_LEVEL,
+    UI_TAG_ICON_VIBRATION,
+    UI_TAG_ICON_SPEED,
+    UI_TAG_ICON_HUMIDITY,
+    UI_TAG_ICON_POSITION,
+    UI_TAG_ICON_COUNTER,
+    UI_TAG_ICON_CONNECTIVITY,
+    UI_TAG_ICON_MAINTENANCE,
+    UI_TAG_ICON_OPERATING,
+    UI_TAG_ICON_ALARM,
+    UI_TAG_ICON_AUTOMATIC,
+    UI_TAG_ICON_RESET,
+} ui_tag_icon_kind_t;
+
+static bool role_is_any(const char* role, const char* const* roles, size_t role_count)
+{
+    if (role == NULL || role[0] == '\0') {
+        return false;
+    }
+    for (size_t index = 0; index < role_count; ++index) {
+        if (strcmp(role, roles[index]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+#define ROLE_IS_ANY(role, roles) role_is_any((role), (roles), sizeof(roles) / sizeof((roles)[0]))
+
+/** Map protocol metadata to a visual category without inspecting BrowseName or equipment names. */
+static ui_tag_icon_kind_t tag_icon_kind(const data_model_tag_t* tag)
+{
+    if (tag == NULL) {
+        return UI_TAG_ICON_GENERIC;
+    }
+    const char* role = tag->semantic_role;
+    static const char* const temperature_roles[] = {"temperature", "dew_point", "dew_point_temperature"};
+    static const char* const pressure_roles[] = {"pressure", "differential_pressure", "vacuum"};
+    static const char* const demand_roles[] = {"demand", "load", "utilization"};
+    static const char* const flow_roles[] = {"flow", "flow_rate", "volumetric_flow", "mass_flow"};
+    static const char* const electrical_roles[] = {"motor_current", "current", "electrical_current", "voltage",
+                                                    "energy", "power_factor", "conductivity"};
+    static const char* const power_roles[] = {"power", "active_power", "reactive_power", "apparent_power"};
+    static const char* const runtime_roles[] = {"runtime", "operating_hours", "duration"};
+    static const char* const level_roles[] = {"level", "tank_level", "fill_level"};
+    static const char* const vibration_roles[] = {"vibration", "vibration_velocity", "vibration_acceleration"};
+    static const char* const speed_roles[] = {"speed", "rotational_speed", "rpm", "frequency"};
+    static const char* const humidity_roles[] = {"humidity", "relative_humidity", "moisture"};
+    static const char* const position_roles[] = {"position", "valve_position", "opening", "setpoint"};
+    static const char* const counter_roles[] = {"count", "cycle_count", "starts_count", "production_total",
+                                                "consumption_total"};
+    static const char* const connectivity_roles[] = {"connectivity", "signal_strength", "link_quality"};
+    static const char* const maintenance_roles[] = {"maintenance", "service_due", "health"};
+    static const char* const operating_roles[] = {"operating_status", "operating_command"};
+    static const char* const alarm_roles[] = {"alarm_status", "fault_status", "fault_command"};
+    static const char* const automatic_roles[] = {"automatic_mode", "control_mode"};
+    static const char* const reset_roles[] = {"alarm_reset_command", "reset_command"};
+
+    if (ROLE_IS_ANY(role, temperature_roles))
+        return UI_TAG_ICON_TEMPERATURE;
+    if (ROLE_IS_ANY(role, pressure_roles))
+        return UI_TAG_ICON_PRESSURE;
+    if (ROLE_IS_ANY(role, demand_roles))
+        return UI_TAG_ICON_DEMAND;
+    if (ROLE_IS_ANY(role, flow_roles))
+        return UI_TAG_ICON_FLOW;
+    if (ROLE_IS_ANY(role, electrical_roles))
+        return UI_TAG_ICON_ELECTRICAL;
+    if (ROLE_IS_ANY(role, power_roles))
+        return UI_TAG_ICON_POWER;
+    if (ROLE_IS_ANY(role, runtime_roles))
+        return UI_TAG_ICON_RUNTIME;
+    if (ROLE_IS_ANY(role, level_roles))
+        return UI_TAG_ICON_LEVEL;
+    if (ROLE_IS_ANY(role, vibration_roles))
+        return UI_TAG_ICON_VIBRATION;
+    if (ROLE_IS_ANY(role, speed_roles))
+        return UI_TAG_ICON_SPEED;
+    if (ROLE_IS_ANY(role, humidity_roles))
+        return UI_TAG_ICON_HUMIDITY;
+    if (ROLE_IS_ANY(role, position_roles))
+        return UI_TAG_ICON_POSITION;
+    if (ROLE_IS_ANY(role, counter_roles))
+        return UI_TAG_ICON_COUNTER;
+    if (ROLE_IS_ANY(role, connectivity_roles))
+        return UI_TAG_ICON_CONNECTIVITY;
+    if (ROLE_IS_ANY(role, maintenance_roles))
+        return UI_TAG_ICON_MAINTENANCE;
+    if (ROLE_IS_ANY(role, operating_roles))
+        return UI_TAG_ICON_OPERATING;
+    if (ROLE_IS_ANY(role, alarm_roles))
+        return UI_TAG_ICON_ALARM;
+    if (ROLE_IS_ANY(role, automatic_roles))
+        return UI_TAG_ICON_AUTOMATIC;
+    if (ROLE_IS_ANY(role, reset_roles))
+        return UI_TAG_ICON_RESET;
+    return UI_TAG_ICON_GENERIC;
+}
 
 void ui_theme_style_page(lv_obj_t* page)
 {
@@ -239,26 +349,40 @@ const char* ui_theme_tag_icon(const data_model_tag_t* tag)
     if (tag == NULL) {
         return LV_SYMBOL_BARS;
     }
-    const char* role = tag->semantic_role;
-    if (strcmp(role, "temperature") == 0)
+    switch (tag_icon_kind(tag)) {
+    case UI_TAG_ICON_TEMPERATURE:
         return "T";
-    if (strcmp(role, "pressure") == 0)
+    case UI_TAG_ICON_PRESSURE:
         return "P";
-    if (strcmp(role, "motor_current") == 0)
+    case UI_TAG_ICON_ELECTRICAL:
         return LV_SYMBOL_CHARGE;
-    if (strcmp(role, "runtime") == 0)
+    case UI_TAG_ICON_RUNTIME:
         return LV_SYMBOL_LOOP;
-    if (strcmp(role, "flow") == 0 || strcmp(role, "demand") == 0)
+    case UI_TAG_ICON_FLOW:
+    case UI_TAG_ICON_HUMIDITY:
         return LV_SYMBOL_TINT;
-    if (strcmp(role, "power") == 0)
+    case UI_TAG_ICON_POWER:
         return LV_SYMBOL_POWER;
-    if (strcmp(role, "operating_status") == 0 || strcmp(role, "operating_command") == 0)
-        return LV_SYMBOL_PLAY;
-    if (strcmp(role, "alarm_status") == 0 || strcmp(role, "fault_command") == 0)
-        return LV_SYMBOL_WARNING;
-    if (strcmp(role, "automatic_mode") == 0)
+    case UI_TAG_ICON_SPEED:
         return LV_SYMBOL_REFRESH;
-    return tag->data_type == DATA_MODEL_TYPE_BOOLEAN ? LV_SYMBOL_OK : LV_SYMBOL_BARS;
+    case UI_TAG_ICON_POSITION:
+        return LV_SYMBOL_GPS;
+    case UI_TAG_ICON_COUNTER:
+        return LV_SYMBOL_LIST;
+    case UI_TAG_ICON_CONNECTIVITY:
+        return LV_SYMBOL_WIFI;
+    case UI_TAG_ICON_MAINTENANCE:
+        return LV_SYMBOL_SETTINGS;
+    case UI_TAG_ICON_OPERATING:
+        return LV_SYMBOL_PLAY;
+    case UI_TAG_ICON_ALARM:
+        return LV_SYMBOL_WARNING;
+    case UI_TAG_ICON_AUTOMATIC:
+    case UI_TAG_ICON_RESET:
+        return LV_SYMBOL_REFRESH;
+    default:
+        return tag->data_type == DATA_MODEL_TYPE_BOOLEAN ? LV_SYMBOL_OK : LV_SYMBOL_BARS;
+    }
 }
 
 void ui_theme_create_tag_icon(lv_obj_t* parent, const data_model_tag_t* tag, lv_coord_t size)
@@ -266,9 +390,9 @@ void ui_theme_create_tag_icon(lv_obj_t* parent, const data_model_tag_t* tag, lv_
     if (parent == NULL || tag == NULL) {
         return;
     }
-    const char* role = tag->semantic_role;
+    ui_tag_icon_kind_t icon_kind = tag_icon_kind(tag);
     lv_color_t color = lv_color_hex(UI_COLOR_ACCENT_SOFT);
-    if (strcmp(role, "temperature") == 0) {
+    if (icon_kind == UI_TAG_ICON_TEMPERATURE) {
         lv_obj_t* stem = lv_obj_create(parent);
         lv_obj_remove_style_all(stem);
         lv_obj_set_size(stem, size / 5, size / 2);
@@ -286,7 +410,7 @@ void ui_theme_create_tag_icon(lv_obj_t* parent, const data_model_tag_t* tag, lv_
         lv_obj_align(bulb, LV_ALIGN_CENTER, 0, size / 5);
         return;
     }
-    if (strcmp(role, "demand") == 0) {
+    if (icon_kind == UI_TAG_ICON_DEMAND) {
         const lv_coord_t heights[] = {size / 3, size / 2, (lv_coord_t)(size * 3 / 4)};
         lv_coord_t group_height    = heights[2];
         for (size_t index = 0; index < 3; ++index) {
@@ -301,7 +425,7 @@ void ui_theme_create_tag_icon(lv_obj_t* parent, const data_model_tag_t* tag, lv_
         }
         return;
     }
-    if (strcmp(role, "pressure") == 0) {
+    if (icon_kind == UI_TAG_ICON_PRESSURE) {
         lv_obj_t* gauge = lv_arc_create(parent);
         lv_obj_remove_style_all(gauge);
         lv_obj_set_size(gauge, size, size);
@@ -334,6 +458,35 @@ void ui_theme_create_tag_icon(lv_obj_t* parent, const data_model_tag_t* tag, lv_
         lv_obj_set_style_bg_color(hub, color, LV_PART_MAIN);
         lv_obj_set_style_bg_opa(hub, LV_OPA_COVER, LV_PART_MAIN);
         lv_obj_center(hub);
+        return;
+    }
+    if (icon_kind == UI_TAG_ICON_LEVEL) {
+        lv_obj_t* tank = lv_obj_create(parent);
+        lv_obj_remove_style_all(tank);
+        lv_obj_set_size(tank, size * 3 / 4, size * 4 / 5);
+        lv_obj_set_style_radius(tank, 3, LV_PART_MAIN);
+        lv_obj_set_style_border_color(tank, color, LV_PART_MAIN);
+        lv_obj_set_style_border_width(tank, size >= 30 ? 3 : 2, LV_PART_MAIN);
+        lv_obj_set_style_border_opa(tank, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_center(tank);
+
+        lv_obj_t* fill = lv_obj_create(tank);
+        lv_obj_remove_style_all(fill);
+        lv_obj_set_size(fill, lv_pct(100), lv_pct(38));
+        lv_obj_set_style_radius(fill, 1, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(fill, color, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(fill, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_align(fill, LV_ALIGN_BOTTOM_MID, 0, 0);
+        return;
+    }
+    if (icon_kind == UI_TAG_ICON_VIBRATION) {
+        lv_obj_t* wave = lv_line_create(parent);
+        lv_line_set_points(wave, VIBRATION_WAVE_POINTS,
+                           sizeof(VIBRATION_WAVE_POINTS) / sizeof(VIBRATION_WAVE_POINTS[0]));
+        lv_obj_set_style_line_width(wave, size >= 30 ? 3 : 2, LV_PART_MAIN);
+        lv_obj_set_style_line_color(wave, color, LV_PART_MAIN);
+        lv_obj_set_style_line_rounded(wave, true, LV_PART_MAIN);
+        lv_obj_center(wave);
         return;
     }
 

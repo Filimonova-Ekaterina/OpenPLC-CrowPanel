@@ -29,6 +29,7 @@ typedef struct
     uint32_t last_check_time;
     bool is_checking;
     bool is_running;
+    bool active_ping_enabled;
 
     SemaphoreHandle_t ping_semaphore;
     SemaphoreHandle_t ping_mutex;
@@ -64,6 +65,7 @@ bool wifi_connectivity_init(void)
     memset(&s_ctx, 0, sizeof(s_ctx));
     s_ctx.current_status    = WIFI_CONNECTIVITY_UNKNOWN;
     s_ctx.check_interval_ms = DEFAULT_CHECK_INTERVAL_MS;
+    s_ctx.active_ping_enabled = false;
 
     s_ctx.ping_semaphore = xSemaphoreCreateBinary();
     s_ctx.ping_mutex     = xSemaphoreCreateMutex();
@@ -295,6 +297,10 @@ static bool perform_ping_test(const char* target_ip)
     bool success = false;
     if (xSemaphoreTake(s_ctx.ping_semaphore, pdMS_TO_TICKS(PING_TIMEOUT_MS)) == pdTRUE) {
         success = (s_ctx.ping_replies > 0);
+        if (xSemaphoreTake(s_ctx.ping_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            cleanup_ping();
+            xSemaphoreGive(s_ctx.ping_mutex);
+        }
     } else {
         ESP_LOGW(TAG, "Ping timed out");
         if (xSemaphoreTake(s_ctx.ping_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
@@ -348,14 +354,17 @@ wifi_connectivity_status_t wifi_connectivity_check_now(void)
     wifi_connectivity_status_t result;
     const char* detail = NULL;
 
-    // First check if we have an IP
+    /* The HMI only requires LAN reachability. Active ICMP probes add avoidable
+     * traffic on the ESP32-P4 SDIO Wi-Fi link, so they stay disabled by
+     * default. Association, DHCP state, and RSSI are sufficient here. */
     if (! has_ip_address()) {
         result = WIFI_CONNECTIVITY_NO_INTERNET;
-        detail = "Connected (No internet)";
+        detail = "Connected (waiting for IP)";
     } else {
-        vTaskDelay(pdMS_TO_TICKS(5000));
-        // Try to ping Google DNS
-        bool ping_ok = perform_ping_test("8.8.8.8");
+        bool ping_ok = true;
+        if (s_ctx.active_ping_enabled) {
+            ping_ok = perform_ping_test("8.8.8.8");
+        }
 
         if (ping_ok) {
             int rssi = wifi_connectivity_get_rssi();
@@ -364,7 +373,7 @@ wifi_connectivity_status_t wifi_connectivity_check_now(void)
                 detail = "Connected (weak signal)";
             } else {
                 result = WIFI_CONNECTIVITY_OK;
-                detail = "Connected with internet";
+                detail = "Connected with LAN access";
             }
         } else {
             // Ping failed - try gateway to determine if router or ISP problem

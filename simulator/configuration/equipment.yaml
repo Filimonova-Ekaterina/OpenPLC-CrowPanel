@@ -9,6 +9,7 @@ simulation:
 
 station:
   id: "compressed_air_station"
+  entity_kind: "System"
   browse_name: "CompressedAirStation"
   display_name: "Compressed Air Station"
   description: "Automatically discoverable compressed-air station simulation"
@@ -34,6 +35,7 @@ station:
       initial_value: false
 
 compressor_defaults: &compressor_defaults
+  entity_kind: "ActiveEquipment"
   stopped_temperature_c: 25.0
   running_temperature_c: 80.0
   heating_rate_c_per_second: 0.35
@@ -128,6 +130,7 @@ compressors:
 
 receiver:
   id: "air_receiver"
+  entity_kind: "PassiveEquipment"
   browse_name: "AirReceiver"
   display_name: "Air Receiver"
   description: "Compressed-air storage receiver"
@@ -144,6 +147,7 @@ receiver:
 
 dryer:
   id: "air_dryer"
+  entity_kind: "ActiveEquipment"
   browse_name: "AirDryer"
   display_name: "Air Dryer"
   description: "Dryer follows station production status"
@@ -157,6 +161,7 @@ dryer:
 
 air_network:
   id: "air_network"
+  entity_kind: "Process"
   browse_name: "AirNetwork"
   display_name: "Air Network"
   description: "Plant compressed-air distribution network"

@@ -17,7 +17,7 @@
 
 #define OPCUA_WRITE_QUEUE_LENGTH 12
 #define OPCUA_STATUS_LENGTH 128
-#define OPCUA_EVENT_FIELD_COUNT 3
+#define OPCUA_EVENT_FIELD_COUNT 4
 
 typedef enum
 {
@@ -71,6 +71,8 @@ static UA_StatusCode process_child_references(opcua_client_t* context, const UA_
 static void release_continuation_point(opcua_client_t* context, UA_ByteString* continuation_point);
 static UA_StatusCode add_variable(opcua_client_t* context, const UA_ReferenceDescription* reference,
                                   size_t equipment_index, unsigned depth);
+static void read_object_metadata(opcua_client_t* context, const UA_NodeId* object_node_id,
+                                 data_model_equipment_t* equipment);
 static void read_variable_metadata(opcua_client_t* context, const UA_NodeId* variable_node_id, data_model_tag_t* tag);
 static void create_subscriptions(opcua_client_t* context);
 static void create_event_subscriptions(opcua_client_t* context);
@@ -86,6 +88,46 @@ static void event_notification_callback(UA_Client* client, UA_UInt32 subscriptio
                                         UA_UInt32 monitored_item_id, void* monitored_item_context,
                                         size_t event_field_count, UA_Variant* event_fields);
 static void configure_event_field(UA_SimpleAttributeOperand* operand, const char* browse_name);
+
+static bool is_ns0_numeric_node(const UA_NodeId* node_id, UA_UInt32 identifier)
+{
+    return node_id != NULL && node_id->namespaceIndex == 0 && node_id->identifierType == UA_NODEIDTYPE_NUMERIC &&
+           node_id->identifier.numeric == identifier;
+}
+
+static data_model_entity_kind_t parse_entity_kind(const char* value)
+{
+    if (value == NULL) {
+        return DATA_MODEL_ENTITY_UNKNOWN;
+    }
+    if (strcmp(value, "System") == 0) {
+        return DATA_MODEL_ENTITY_SYSTEM;
+    }
+    if (strcmp(value, "Process") == 0) {
+        return DATA_MODEL_ENTITY_PROCESS;
+    }
+    if (strcmp(value, "ActiveEquipment") == 0) {
+        return DATA_MODEL_ENTITY_ACTIVE_EQUIPMENT;
+    }
+    if (strcmp(value, "PassiveEquipment") == 0) {
+        return DATA_MODEL_ENTITY_PASSIVE_EQUIPMENT;
+    }
+    if (strcmp(value, "Group") == 0) {
+        return DATA_MODEL_ENTITY_GROUP;
+    }
+    return DATA_MODEL_ENTITY_UNKNOWN;
+}
+
+/** Compare full OPC UA NodeIds so aliases in the address-space graph are mapped only once. */
+static size_t find_mapped_node_id(const UA_NodeId* mapped_ids, size_t mapped_count, const UA_NodeId* candidate)
+{
+    for (size_t index = 0; index < mapped_count; ++index) {
+        if (UA_NodeId_equal(&mapped_ids[index], candidate)) {
+            return index;
+        }
+    }
+    return DATA_MODEL_INVALID_INDEX;
+}
 
 esp_err_t opcua_client_create(const opcua_client_config_t* configuration, data_model_t* data_model,
                               opcua_client_t** client_out)
@@ -379,7 +421,7 @@ static void client_task(void* argument)
         create_subscriptions(context);
         char connected_details[96];
         snprintf(connected_details, sizeof(connected_details), "Connected: %u objects, %u tags",
-                 (unsigned)data_model_equipment_count(context->data_model),
+                 (unsigned)data_model_object_count(context->data_model),
                  (unsigned)data_model_tag_count(context->data_model));
         set_status(context, OPCUA_CLIENT_CONNECTED, connected_details);
         ESP_LOGI(TAG, "%s", connected_details);
@@ -392,6 +434,17 @@ static void client_task(void* argument)
                 ESP_LOGW(TAG, "Connection iteration failed: %s", UA_StatusCode_name(status));
                 break;
             }
+            UA_SecureChannelState channel_state;
+            UA_SessionState session_state;
+            UA_StatusCode connect_status;
+            UA_Client_getState(context->ua_client, &channel_state, &session_state, &connect_status);
+            if (channel_state != UA_SECURECHANNELSTATE_OPEN || session_state != UA_SESSIONSTATE_ACTIVATED ||
+                connect_status != UA_STATUSCODE_GOOD) {
+                ESP_LOGW(TAG, "OPC UA connection state changed: channel=%d session=%d status=%s",
+                         (int)channel_state, (int)session_state, UA_StatusCode_name(connect_status));
+                status = connect_status != UA_STATUSCODE_GOOD ? connect_status : UA_STATUSCODE_BADCONNECTIONCLOSED;
+                break;
+            }
         }
 
         if (context->pause_requested) {
@@ -401,7 +454,12 @@ static void client_task(void* argument)
         } else {
             set_status(context, OPCUA_CLIENT_CONNECTION_ERROR, "Connection lost; retrying");
         }
-        UA_Client_disconnect(context->ua_client);
+        if ((context->pause_requested || context->reconnect_requested) && network_is_ready()) {
+            UA_Client_disconnect(context->ua_client);
+        } else {
+            /* Do not wait for a synchronous CloseSession on an already broken TCP path. */
+            UA_Client_disconnectAsync(context->ua_client);
+        }
         UA_Client_delete(context->ua_client);
         context->ua_client       = NULL;
         context->subscription_id = 0;
@@ -426,7 +484,7 @@ static void wait_for_retry(opcua_client_t* context)
 
 static bool network_is_ready(void)
 {
-    if (! wifi_ctrl_is_connected()) {
+    if (! wifi_ctrl_is_connected() || ! wifi_ctrl_has_ip_address()) {
         return false;
     }
     esp_netif_t* station_interface          = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
@@ -586,15 +644,34 @@ static UA_StatusCode process_child_references(opcua_client_t* context, const UA_
 
         UA_StatusCode result = UA_STATUSCODE_GOOD;
         if (reference->nodeClass == UA_NODECLASS_OBJECT) {
+            if (find_mapped_node_id(context->equipment_node_ids, context->mapped_equipment_count, child_node_id) !=
+                DATA_MODEL_INVALID_INDEX) {
+                continue;
+            }
             data_model_equipment_t equipment = {
                 .parent_index = parent_equipment_index,
             };
             node_id_to_text(child_node_id, equipment.node_id, sizeof(equipment.node_id));
+            node_id_to_text(&reference->typeDefinition.nodeId, equipment.type_definition_id,
+                            sizeof(equipment.type_definition_id));
             ua_string_to_text(&reference->browseName.name, equipment.browse_name, sizeof(equipment.browse_name));
             ua_string_to_text(&reference->displayName.text, equipment.display_name, sizeof(equipment.display_name));
             if (equipment.display_name[0] == '\0') {
                 snprintf(equipment.display_name, sizeof(equipment.display_name), "%s", equipment.browse_name);
             }
+            if (parent_equipment_index == DATA_MODEL_INVALID_INDEX) {
+                equipment.reference_kind = DATA_MODEL_REFERENCE_ROOT;
+            } else if (is_ns0_numeric_node(&reference->referenceTypeId, UA_NS0ID_ORGANIZES)) {
+                equipment.reference_kind = DATA_MODEL_REFERENCE_ORGANIZES;
+            } else if (is_ns0_numeric_node(&reference->referenceTypeId, UA_NS0ID_HASCOMPONENT) ||
+                       is_ns0_numeric_node(&reference->referenceTypeId, UA_NS0ID_HASORDEREDCOMPONENT)) {
+                equipment.reference_kind = DATA_MODEL_REFERENCE_COMPONENT;
+            }
+            if (is_ns0_numeric_node(&reference->typeDefinition.nodeId, UA_NS0ID_FOLDERTYPE)) {
+                equipment.entity_kind          = DATA_MODEL_ENTITY_GROUP;
+                equipment.entity_kind_explicit = true;
+            }
+            read_object_metadata(context, child_node_id, &equipment);
 
             size_t equipment_index = DATA_MODEL_INVALID_INDEX;
             esp_err_t add_result   = data_model_add_equipment(context->data_model, &equipment, &equipment_index);
@@ -603,10 +680,12 @@ static UA_StatusCode process_child_references(opcua_client_t* context, const UA_
             }
             UA_NodeId_copy(child_node_id, &context->equipment_node_ids[equipment_index]);
             context->mapped_equipment_count = equipment_index + 1;
-            ESP_LOGI(TAG, "%*s[Object] %s (%s)", (int)(depth * 2), "", equipment.display_name, equipment.node_id);
+            ESP_LOGI(TAG, "%*s[Object] %s (%s) | %s", (int)(depth * 2), "", equipment.display_name,
+                     equipment.node_id, data_model_entity_kind_name(equipment.entity_kind));
             result = browse_children(context, child_node_id, equipment_index, depth + 1);
         } else if (reference->nodeClass == UA_NODECLASS_VARIABLE &&
-                   parent_equipment_index != DATA_MODEL_INVALID_INDEX) {
+                   parent_equipment_index != DATA_MODEL_INVALID_INDEX &&
+                   ! is_ns0_numeric_node(&reference->referenceTypeId, UA_NS0ID_HASPROPERTY)) {
             result = add_variable(context, reference, parent_equipment_index, depth);
         }
 
@@ -631,10 +710,66 @@ static void release_continuation_point(opcua_client_t* context, UA_ByteString* c
     UA_ByteString_clear(continuation_point);
 }
 
+static void read_object_metadata(opcua_client_t* context, const UA_NodeId* object_node_id,
+                                 data_model_equipment_t* equipment)
+{
+    UA_BrowseRequest request;
+    UA_BrowseRequest_init(&request);
+    request.nodesToBrowse = UA_BrowseDescription_new();
+    if (request.nodesToBrowse == NULL) {
+        return;
+    }
+    request.nodesToBrowseSize = 1;
+    UA_NodeId_copy(object_node_id, &request.nodesToBrowse[0].nodeId);
+    request.nodesToBrowse[0].browseDirection = UA_BROWSEDIRECTION_FORWARD;
+    request.nodesToBrowse[0].referenceTypeId = UA_NODEID_NUMERIC(0, UA_NS0ID_HASPROPERTY);
+    request.nodesToBrowse[0].includeSubtypes = true;
+    request.nodesToBrowse[0].nodeClassMask   = UA_NODECLASS_VARIABLE;
+    request.nodesToBrowse[0].resultMask      = UA_BROWSERESULTMASK_ALL;
+
+    UA_BrowseResponse response = UA_Client_Service_browse(context->ua_client, request);
+    UA_BrowseRequest_clear(&request);
+    if (response.responseHeader.serviceResult != UA_STATUSCODE_GOOD) {
+        UA_BrowseResponse_clear(&response);
+        return;
+    }
+
+    for (size_t result_index = 0; result_index < response.resultsSize; ++result_index) {
+        UA_BrowseResult* browse_result = &response.results[result_index];
+        for (size_t reference_index = 0; reference_index < browse_result->referencesSize; ++reference_index) {
+            UA_ReferenceDescription* property = &browse_result->references[reference_index];
+            char property_name[DATA_MODEL_NAME_LENGTH];
+            ua_string_to_text(&property->browseName.name, property_name, sizeof(property_name));
+            if (strcmp(property_name, "EntityKind") != 0) {
+                continue;
+            }
+
+            UA_Variant property_value;
+            UA_Variant_init(&property_value);
+            if (UA_Client_readValueAttribute(context->ua_client, property->nodeId.nodeId, &property_value) ==
+                    UA_STATUSCODE_GOOD &&
+                UA_Variant_hasScalarType(&property_value, &UA_TYPES[UA_TYPES_STRING])) {
+                char entity_kind[DATA_MODEL_NAME_LENGTH];
+                ua_string_to_text((UA_String*)property_value.data, entity_kind, sizeof(entity_kind));
+                data_model_entity_kind_t parsed_kind = parse_entity_kind(entity_kind);
+                if (parsed_kind != DATA_MODEL_ENTITY_UNKNOWN) {
+                    equipment->entity_kind          = parsed_kind;
+                    equipment->entity_kind_explicit = true;
+                }
+            }
+            UA_Variant_clear(&property_value);
+        }
+    }
+    UA_BrowseResponse_clear(&response);
+}
+
 static UA_StatusCode add_variable(opcua_client_t* context, const UA_ReferenceDescription* reference,
                                   size_t equipment_index, unsigned depth)
 {
     const UA_NodeId* node_id = &reference->nodeId.nodeId;
+    if (find_mapped_node_id(context->tag_node_ids, context->mapped_tag_count, node_id) != DATA_MODEL_INVALID_INDEX) {
+        return UA_STATUSCODE_GOOD;
+    }
     UA_NodeId data_type_id   = UA_NODEID_NULL;
     UA_Byte access_level     = 0;
     UA_Variant current_value;
@@ -831,9 +966,10 @@ static void create_event_subscriptions(opcua_client_t* context)
             ESP_LOGW(TAG, "Cannot allocate OPC UA event filter");
             return;
         }
-        configure_event_field(&filter.selectClauses[0], "SourceName");
-        configure_event_field(&filter.selectClauses[1], "Message");
-        configure_event_field(&filter.selectClauses[2], "Severity");
+        configure_event_field(&filter.selectClauses[0], "SourceNode");
+        configure_event_field(&filter.selectClauses[1], "SourceName");
+        configure_event_field(&filter.selectClauses[2], "Message");
+        configure_event_field(&filter.selectClauses[3], "Severity");
 
         UA_MonitoredItemCreateRequest item =
             UA_MonitoredItemCreateRequest_default(context->equipment_node_ids[equipment_index]);
@@ -878,19 +1014,21 @@ static void event_notification_callback(UA_Client* client, UA_UInt32 subscriptio
     (void)monitored_item_context;
     opcua_client_t* context = subscription_context;
     if (context == NULL || event_fields == NULL || event_field_count < OPCUA_EVENT_FIELD_COUNT ||
-        !UA_Variant_hasScalarType(&event_fields[0], &UA_TYPES[UA_TYPES_STRING]) ||
-        !UA_Variant_hasScalarType(&event_fields[1], &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]) ||
-        !UA_Variant_hasScalarType(&event_fields[2], &UA_TYPES[UA_TYPES_UINT16])) {
+        !UA_Variant_hasScalarType(&event_fields[0], &UA_TYPES[UA_TYPES_NODEID]) ||
+        !UA_Variant_hasScalarType(&event_fields[1], &UA_TYPES[UA_TYPES_STRING]) ||
+        !UA_Variant_hasScalarType(&event_fields[2], &UA_TYPES[UA_TYPES_LOCALIZEDTEXT]) ||
+        !UA_Variant_hasScalarType(&event_fields[3], &UA_TYPES[UA_TYPES_UINT16])) {
         ESP_LOGW(TAG, "Ignored malformed OPC UA event notification");
         return;
     }
 
     data_model_alarm_t alarm = {0};
-    ua_string_to_text((UA_String*)event_fields[0].data, alarm.source_name, sizeof(alarm.source_name));
-    UA_LocalizedText* localized_message = event_fields[1].data;
+    node_id_to_text((UA_NodeId*)event_fields[0].data, alarm.source_node_id, sizeof(alarm.source_node_id));
+    ua_string_to_text((UA_String*)event_fields[1].data, alarm.source_name, sizeof(alarm.source_name));
+    UA_LocalizedText* localized_message = event_fields[2].data;
     char message[DATA_MODEL_ALARM_REASON_LENGTH];
     ua_string_to_text(&localized_message->text, message, sizeof(message));
-    alarm.severity = *(UA_UInt16*)event_fields[2].data;
+    alarm.severity = *(UA_UInt16*)event_fields[3].data;
 
     const char* code_start = strchr(message, '[');
     const char* code_end = code_start != NULL ? strchr(code_start + 1, ']') : NULL;

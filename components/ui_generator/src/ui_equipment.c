@@ -11,9 +11,9 @@
 #define EQUIPMENT_NUMERIC_SCALE       100.0
 #define EQUIPMENT_WRITE_HOLD_MS       2000
 #define EQUIPMENT_IDENTITY_WIDTH      220
-#define EQUIPMENT_METRICS_PER_ROW     4
+#define EQUIPMENT_METRICS_PER_ROW     3
 #define EQUIPMENT_CONTROLS_PER_ROW    4
-#define EQUIPMENT_METRIC_CELL_WIDTH   238
+#define EQUIPMENT_METRIC_CELL_WIDTH   315
 #define EQUIPMENT_METRIC_CELL_HEIGHT  78
 #define EQUIPMENT_CONTROL_CELL_HEIGHT 96
 
@@ -42,6 +42,7 @@ typedef struct
 typedef struct
 {
     size_t equipment_index;
+    data_model_entity_kind_t entity_kind;
     size_t status_tag_index;
     size_t alarm_tag_index;
     lv_obj_t* icon_badge;
@@ -98,7 +99,7 @@ ui_equipment_view_t* ui_equipment_create(lv_obj_t* page, data_model_t* data_mode
     view->opcua_client           = opcua_client;
     view->mode                   = mode;
     view->tag_binding_capacity   = data_model_tag_count(data_model) + 1;
-    view->state_binding_capacity = data_model_equipment_count(data_model) + 1;
+    view->state_binding_capacity = data_model_object_count(data_model) + 1;
     view->tag_bindings           = calloc(view->tag_binding_capacity, sizeof(*view->tag_bindings));
     view->state_bindings         = calloc(view->state_binding_capacity, sizeof(*view->state_bindings));
     if (view->tag_bindings == NULL || view->state_bindings == NULL) {
@@ -106,7 +107,8 @@ ui_equipment_view_t* ui_equipment_create(lv_obj_t* page, data_model_t* data_mode
         return NULL;
     }
 
-    size_t equipment_count = data_model_equipment_count(data_model);
+    size_t object_count    = data_model_object_count(data_model);
+    size_t equipment_count = data_model_asset_count(data_model);
     size_t writable_total  = 0;
     for (size_t tag_index = 0; tag_index < data_model_tag_count(data_model); ++tag_index) {
         data_model_tag_t tag;
@@ -117,26 +119,37 @@ ui_equipment_view_t* ui_equipment_create(lv_obj_t* page, data_model_t* data_mode
 
     char detail[64];
     if (mode == UI_EQUIPMENT_PAGE_DETAILS) {
-        snprintf(detail, sizeof(detail), "%u discovered  |  live", (unsigned)equipment_count);
+        snprintf(detail, sizeof(detail), "%u active  |  %u passive",
+                 (unsigned)data_model_active_equipment_count(data_model),
+                 (unsigned)data_model_passive_equipment_count(data_model));
         ui_theme_create_heading(page, "Equipment", detail);
     } else {
         snprintf(detail, sizeof(detail), "%u writable variables", (unsigned)writable_total);
         ui_theme_create_heading(page, "Controls", detail);
     }
 
-    if (equipment_count == 0) {
+    if (object_count == 0) {
         ui_theme_create_empty_state(page, "Waiting for equipment", "Cards appear automatically after OPC UA discovery",
+                                    lv_color_hex(UI_COLOR_ACCENT));
+        return view;
+    }
+    if (mode == UI_EQUIPMENT_PAGE_DETAILS && equipment_count == 0) {
+        ui_theme_create_empty_state(page, "No physical equipment",
+                                    "System and process objects remain available in signals and trends",
                                     lv_color_hex(UI_COLOR_ACCENT));
         return view;
     }
 
     size_t created_cards = 0;
-    for (size_t equipment_index = 0; equipment_index < equipment_count; ++equipment_index) {
+    for (size_t equipment_index = 0; equipment_index < object_count; ++equipment_index) {
         data_model_equipment_t equipment;
         if (! data_model_get_equipment(data_model, equipment_index, &equipment)) {
             continue;
         }
         if (mode == UI_EQUIPMENT_PAGE_DETAILS) {
+            if (! data_model_entity_is_equipment(equipment.entity_kind)) {
+                continue;
+            }
             create_equipment_card(view, page, &equipment);
             created_cards++;
         } else {
@@ -193,7 +206,7 @@ static void create_equipment_card(ui_equipment_view_t* view, lv_obj_t* page, con
     lv_obj_set_flex_flow(metrics, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(metrics, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_row(metrics, 8, LV_PART_MAIN);
-    lv_obj_set_style_pad_column(metrics, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(metrics, 0, LV_PART_MAIN);
     lv_obj_clear_flag(metrics, LV_OBJ_FLAG_SCROLLABLE);
 
     if (control_count > 0) {
@@ -275,6 +288,7 @@ static void create_equipment_header(ui_equipment_view_t* view, lv_obj_t* card, c
     equipment_state_binding_t* state = allocate_state_binding(view);
     if (state != NULL) {
         state->equipment_index  = equipment->index;
+        state->entity_kind      = equipment->entity_kind;
         state->status_tag_index = DATA_MODEL_INVALID_INDEX;
         state->alarm_tag_index  = DATA_MODEL_INVALID_INDEX;
         data_model_tag_t role_tag;
@@ -322,7 +336,8 @@ static void create_equipment_header(ui_equipment_view_t* view, lv_obj_t* card, c
     lv_obj_set_style_pad_all(state_badge, 0, LV_PART_MAIN);
     lv_obj_align(state_badge, LV_ALIGN_TOP_RIGHT, 0, 5);
     lv_obj_t* state_label = lv_label_create(state_badge);
-    lv_label_set_text(state_label, "AVAILABLE");
+    lv_label_set_text(state_label,
+                      equipment->entity_kind == DATA_MODEL_ENTITY_PASSIVE_EQUIPMENT ? "MONITORED" : "AVAILABLE");
     lv_obj_set_style_text_color(state_label, lv_color_hex(UI_COLOR_INACTIVE), LV_PART_MAIN);
     lv_obj_set_style_text_font(state_label, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_center(state_label);
@@ -344,6 +359,7 @@ static lv_obj_t* create_identity(ui_equipment_view_t* view, lv_obj_t* card, cons
     equipment_state_binding_t* state = allocate_state_binding(view);
     if (state != NULL) {
         state->equipment_index  = equipment->index;
+        state->entity_kind      = equipment->entity_kind;
         state->status_tag_index = DATA_MODEL_INVALID_INDEX;
         state->alarm_tag_index  = DATA_MODEL_INVALID_INDEX;
         data_model_tag_t role_tag;
@@ -390,7 +406,8 @@ static lv_obj_t* create_identity(ui_equipment_view_t* view, lv_obj_t* card, cons
     lv_obj_set_style_pad_all(state_badge, 0, LV_PART_MAIN);
     lv_obj_align(state_badge, LV_ALIGN_LEFT_MID, 72, 18);
     lv_obj_t* state_label = lv_label_create(state_badge);
-    lv_label_set_text(state_label, "AVAILABLE");
+    lv_label_set_text(state_label,
+                      equipment->entity_kind == DATA_MODEL_ENTITY_PASSIVE_EQUIPMENT ? "MONITORED" : "AVAILABLE");
     lv_obj_set_style_text_color(state_label, lv_color_hex(UI_COLOR_INACTIVE), LV_PART_MAIN);
     lv_obj_set_style_text_font(state_label, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_center(state_label);
@@ -423,7 +440,7 @@ static void create_metric(ui_equipment_view_t* view, lv_obj_t* parent, const dat
     lv_obj_set_size(cell, EQUIPMENT_METRIC_CELL_WIDTH, EQUIPMENT_METRIC_CELL_HEIGHT);
     lv_obj_set_flex_flow(cell, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(cell, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(cell, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(cell, 4, LV_PART_MAIN);
     lv_obj_clear_flag(cell, LV_OBJ_FLAG_SCROLLABLE);
 
     const char* source_name = tag->display_name[0] != '\0' ? tag->display_name : tag->browse_name;
@@ -433,8 +450,8 @@ static void create_metric(ui_equipment_view_t* view, lv_obj_t* parent, const dat
         lv_txt_get_width(human_name, (uint32_t)strlen(human_name), &lv_font_montserrat_12, 0, LV_TEXT_FLAG_NONE) + 6;
     if (identity_width < 64)
         identity_width = 64;
-    if (identity_width > 98)
-        identity_width = 98;
+    if (identity_width > 94)
+        identity_width = 94;
 
     lv_obj_t* identity = lv_obj_create(cell);
     lv_obj_remove_style_all(identity);
@@ -446,7 +463,7 @@ static void create_metric(ui_equipment_view_t* view, lv_obj_t* parent, const dat
     ui_theme_style_card(icon_badge, lv_color_hex(UI_COLOR_SURFACE_RAISED), LV_RADIUS_CIRCLE);
     lv_obj_set_style_border_color(icon_badge, lv_color_hex(UI_COLOR_BORDER), LV_PART_MAIN);
     lv_obj_set_style_pad_all(icon_badge, 0, LV_PART_MAIN);
-    lv_obj_align(icon_badge, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_align(icon_badge, LV_ALIGN_TOP_MID, 0, 5);
     ui_theme_create_tag_icon(icon_badge, tag, 20);
 
     lv_obj_t* name = lv_label_create(identity);
@@ -456,7 +473,7 @@ static void create_metric(ui_equipment_view_t* view, lv_obj_t* parent, const dat
     lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_style_text_color(name, lv_color_hex(UI_COLOR_TEXT_SECONDARY), LV_PART_MAIN);
     lv_obj_set_style_text_font(name, &lv_font_montserrat_12, LV_PART_MAIN);
-    lv_obj_align(name, LV_ALIGN_TOP_MID, 0, 42);
+    lv_obj_align(name, LV_ALIGN_TOP_MID, 0, 47);
 
     binding->value_label = lv_label_create(cell);
     lv_label_set_text(binding->value_label, "No value");
@@ -568,17 +585,26 @@ void ui_equipment_update(ui_equipment_view_t* view)
         bool alarm = state->alarm_tag_index != DATA_MODEL_INVALID_INDEX &&
                      data_model_get_tag(view->data_model, state->alarm_tag_index, &alarm_tag) &&
                      alarm_tag.value_valid && alarm_tag.value.boolean_value;
+        bool passive = state->entity_kind == DATA_MODEL_ENTITY_PASSIVE_EQUIPMENT;
+        if (passive) {
+            running = false;
+        }
         if (! state->displayed_valid || state->displayed_running != running || state->displayed_alarm != alarm) {
             const char* text =
                 alarm ? "ALARM"
-                      : (running ? "RUNNING"
-                                 : (state->status_tag_index != DATA_MODEL_INVALID_INDEX ? "READY" : "AVAILABLE"));
+                      : (passive ? "MONITORED"
+                                 : (running ? "RUNNING"
+                                            : (state->status_tag_index != DATA_MODEL_INVALID_INDEX ? "READY"
+                                                                                                  : "AVAILABLE")));
             lv_color_t color = alarm ? lv_color_hex(UI_COLOR_DANGER)
-                                     : (running ? lv_color_hex(UI_COLOR_SUCCESS) : lv_color_hex(UI_COLOR_INACTIVE));
+                                     : (passive ? lv_color_hex(UI_COLOR_ACCENT_SOFT)
+                                                : (running ? lv_color_hex(UI_COLOR_SUCCESS)
+                                                           : lv_color_hex(UI_COLOR_INACTIVE)));
             ui_theme_set_label_text(state->state_label, text);
             lv_obj_set_style_text_color(state->state_label, color, LV_PART_MAIN);
             lv_obj_set_style_border_color(state->state_badge, color, LV_PART_MAIN);
-            lv_obj_set_style_border_opa(state->state_badge, running || alarm ? LV_OPA_COVER : LV_OPA_70, LV_PART_MAIN);
+            lv_obj_set_style_border_opa(state->state_badge, running || alarm || passive ? LV_OPA_COVER : LV_OPA_70,
+                                        LV_PART_MAIN);
             lv_obj_set_style_border_color(state->icon_badge, color, LV_PART_MAIN);
             state->displayed_running = running;
             state->displayed_alarm   = alarm;

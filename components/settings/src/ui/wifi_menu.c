@@ -142,16 +142,22 @@ static void init_styles(void)
 static void start_portal_if_needed(void)
 {
     if (!wifi_menu_active) return;
-    if (!s_wifi_menu.scan_done) return;
     if (wifi_ctrl_is_connected()) return;
-    
-    if (s_wifi_menu.portal_running) {
-        config_portal_stop();
-        s_wifi_menu.portal_running = false;
+
+    if (config_portal_is_running()) {
+        s_wifi_menu.portal_running = true;
+        update_qr_display(&s_wifi_menu.qr_block);
+        return;
     }
-    
-    config_portal_start();
-    s_wifi_menu.portal_running = true;
+
+    s_wifi_menu.portal_running = false;
+    esp_err_t result = config_portal_start();
+    s_wifi_menu.portal_running = result == ESP_OK && config_portal_is_running();
+    if (! s_wifi_menu.portal_running) {
+        ESP_LOGE(TAG, "Cannot start configuration portal: %s", esp_err_to_name(result));
+        update_qr_display(&s_wifi_menu.qr_block);
+        return;
+    }
     
     if (s_wifi_menu.qr_block.update_timer) {
         lv_timer_del(s_wifi_menu.qr_block.update_timer);
@@ -958,6 +964,7 @@ static void on_disconnected(void* arg)
         config_portal_stop();
         s_wifi_menu.portal_running = false;
     }
+    start_portal_if_needed();
     update_qr_display(&s_wifi_menu.qr_block);
     
     s_wifi_menu.scan_in_progress = false;

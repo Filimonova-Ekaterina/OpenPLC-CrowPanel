@@ -76,6 +76,7 @@ class OpcUaStationServer:
             ua.AttributeIds.Description,
             str(station_configuration["description"]),
         )
+        await self._add_entity_kind_property(self.station_object, station_configuration)
         await self.station_object.set_event_notifier([ua.EventNotifier.SubscribeToEvents])
 
         for compressor_configuration in self.configuration["compressors"]:
@@ -153,7 +154,21 @@ class OpcUaStationServer:
         await self._write_localized_attribute(
             node, ua.AttributeIds.Description, str(configuration["description"])
         )
+        await self._add_entity_kind_property(node, configuration)
         return node
+
+    async def _add_entity_kind_property(
+        self, node: Node, configuration: dict[str, Any]
+    ) -> None:
+        """Publish an object's semantic class as discoverable OPC UA metadata."""
+
+        entity_kind = configuration.get("entity_kind")
+        if entity_kind is not None:
+            await node.add_property(
+                self.namespace_index,
+                "EntityKind",
+                str(entity_kind),
+            )
 
     async def _add_float_variable(
         self, parent: Node, configuration: dict[str, Any], writable: bool = False

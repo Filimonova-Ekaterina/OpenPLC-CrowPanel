@@ -33,6 +33,68 @@ static void mark_structure_changed(data_model_t* model)
     }
 }
 
+static bool tag_is_numeric(const data_model_tag_t* tag)
+{
+    return tag->data_type == DATA_MODEL_TYPE_INTEGER || tag->data_type == DATA_MODEL_TYPE_FLOAT ||
+           tag->data_type == DATA_MODEL_TYPE_DOUBLE;
+}
+
+/** Infer only when the server did not publish an explicit semantic kind. */
+static void classify_entities_locked(data_model_t* model)
+{
+    for (size_t equipment_index = 0; equipment_index < model->equipment_count; ++equipment_index) {
+        data_model_equipment_t* equipment = &model->equipment[equipment_index];
+        if (equipment->entity_kind_explicit) {
+            continue;
+        }
+
+        bool has_children         = false;
+        bool has_tags             = false;
+        bool has_measurements     = false;
+        bool has_commands         = false;
+        bool has_operating_status = false;
+        bool has_process_context  = false;
+        for (size_t child_index = 0; child_index < model->equipment_count; ++child_index) {
+            if (model->equipment[child_index].parent_index == equipment_index) {
+                has_children = true;
+                break;
+            }
+        }
+        for (size_t tag_index = 0; tag_index < model->tag_count; ++tag_index) {
+            const data_model_tag_t* tag = &model->tags[tag_index];
+            if (tag->equipment_index != equipment_index) {
+                continue;
+            }
+            has_tags = true;
+            if (tag->writable) {
+                has_commands = true;
+            }
+            if (strcmp(tag->semantic_role, "operating_status") == 0) {
+                has_operating_status = true;
+            }
+            if (strcmp(tag->semantic_role, "demand") == 0 || strcmp(tag->semantic_role, "production_total") == 0 ||
+                strcmp(tag->semantic_role, "consumption_total") == 0) {
+                has_process_context = true;
+            }
+            if (tag->readable && ! tag->writable && tag_is_numeric(tag)) {
+                has_measurements = true;
+            }
+        }
+
+        if (has_children) {
+            equipment->entity_kind = DATA_MODEL_ENTITY_SYSTEM;
+        } else if (has_process_context) {
+            equipment->entity_kind = DATA_MODEL_ENTITY_PROCESS;
+        } else if (has_commands || has_operating_status) {
+            equipment->entity_kind = DATA_MODEL_ENTITY_ACTIVE_EQUIPMENT;
+        } else if (has_measurements || has_tags) {
+            equipment->entity_kind = DATA_MODEL_ENTITY_PASSIVE_EQUIPMENT;
+        } else {
+            equipment->entity_kind = DATA_MODEL_ENTITY_GROUP;
+        }
+    }
+}
+
 static bool model_lock(const data_model_t* model)
 {
     return model != NULL && model->mutex != NULL && xSemaphoreTake(model->mutex, portMAX_DELAY) == pdTRUE;
@@ -115,6 +177,7 @@ void data_model_end_structure_update(data_model_t* model)
         return;
     }
     if (model->structure_update_active && model->structure_dirty) {
+        classify_entities_locked(model);
         model->structure_generation++;
     }
     model->structure_update_active = false;
@@ -210,13 +273,13 @@ bool data_model_get_tag(const data_model_t* model, size_t tag_index, data_model_
 
 esp_err_t data_model_update_alarm(data_model_t* model, const data_model_alarm_t* alarm)
 {
-    if (alarm == NULL || alarm->source_name[0] == '\0' || alarm->alarm_code[0] == '\0' || !model_lock(model)) {
+    if (alarm == NULL || alarm->source_node_id[0] == '\0' || alarm->alarm_code[0] == '\0' || !model_lock(model)) {
         return ESP_ERR_INVALID_ARG;
     }
 
     size_t alarm_index = DATA_MODEL_INVALID_INDEX;
     for (size_t index = 0; index < model->alarm_count; ++index) {
-        if (strcmp(model->alarms[index].source_name, alarm->source_name) == 0 &&
+        if (strcmp(model->alarms[index].source_node_id, alarm->source_node_id) == 0 &&
             strcmp(model->alarms[index].alarm_code, alarm->alarm_code) == 0) {
             alarm_index = index;
             break;
@@ -287,7 +350,7 @@ size_t data_model_active_alarm_count(const data_model_t* model)
     return active_count;
 }
 
-size_t data_model_equipment_count(const data_model_t* model)
+size_t data_model_object_count(const data_model_t* model)
 {
     if (! model_lock(model)) {
         return 0;
@@ -295,6 +358,51 @@ size_t data_model_equipment_count(const data_model_t* model)
     size_t count = model->equipment_count;
     model_unlock(model);
     return count;
+}
+
+size_t data_model_equipment_count(const data_model_t* model)
+{
+    return data_model_object_count(model);
+}
+
+static size_t count_entity_kind(const data_model_t* model, data_model_entity_kind_t entity_kind)
+{
+    if (! model_lock(model)) {
+        return 0;
+    }
+    size_t count = 0;
+    for (size_t index = 0; index < model->equipment_count; ++index) {
+        if (model->equipment[index].entity_kind == entity_kind) {
+            ++count;
+        }
+    }
+    model_unlock(model);
+    return count;
+}
+
+size_t data_model_asset_count(const data_model_t* model)
+{
+    if (! model_lock(model)) {
+        return 0;
+    }
+    size_t count = 0;
+    for (size_t index = 0; index < model->equipment_count; ++index) {
+        if (data_model_entity_is_equipment(model->equipment[index].entity_kind)) {
+            ++count;
+        }
+    }
+    model_unlock(model);
+    return count;
+}
+
+size_t data_model_active_equipment_count(const data_model_t* model)
+{
+    return count_entity_kind(model, DATA_MODEL_ENTITY_ACTIVE_EQUIPMENT);
+}
+
+size_t data_model_passive_equipment_count(const data_model_t* model)
+{
+    return count_entity_kind(model, DATA_MODEL_ENTITY_PASSIVE_EQUIPMENT);
 }
 
 size_t data_model_tag_count(const data_model_t* model)
@@ -350,6 +458,30 @@ const char* data_model_type_name(data_model_type_t data_type)
         return "DOUBLE";
     case DATA_MODEL_TYPE_STRING:
         return "STRING";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+bool data_model_entity_is_equipment(data_model_entity_kind_t entity_kind)
+{
+    return entity_kind == DATA_MODEL_ENTITY_ACTIVE_EQUIPMENT ||
+           entity_kind == DATA_MODEL_ENTITY_PASSIVE_EQUIPMENT;
+}
+
+const char* data_model_entity_kind_name(data_model_entity_kind_t entity_kind)
+{
+    switch (entity_kind) {
+    case DATA_MODEL_ENTITY_SYSTEM:
+        return "SYSTEM";
+    case DATA_MODEL_ENTITY_PROCESS:
+        return "PROCESS";
+    case DATA_MODEL_ENTITY_ACTIVE_EQUIPMENT:
+        return "ACTIVE_EQUIPMENT";
+    case DATA_MODEL_ENTITY_PASSIVE_EQUIPMENT:
+        return "PASSIVE_EQUIPMENT";
+    case DATA_MODEL_ENTITY_GROUP:
+        return "GROUP";
     default:
         return "UNKNOWN";
     }

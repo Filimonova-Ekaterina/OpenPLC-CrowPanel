@@ -8,6 +8,9 @@ void wifi_ctrl_init();
 void wifi_ctrl_deinit();
 void wifi_ctrl_try_stop_scanner();
 bool wifi_ctrl_is_connected();
+
+/** Return true only after the station has received a current DHCP address. */
+bool wifi_ctrl_has_ip_address(void);
 /**
  * @brief Save current WiFi state to NVS
  */

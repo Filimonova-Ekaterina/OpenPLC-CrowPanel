@@ -258,7 +258,7 @@ static void on_wifi_event(void* arg, esp_event_base_t event_base, int32_t event_
         }
         s_mgr.interface_started                     = false;
         s_mgr.connected                             = false;
-        s_mgr.ip_lost                               = false;
+        s_mgr.ip_lost                               = true;
         s_mgr.pending_connect_from_uart_credentials = false;
         s_mgr.network_ssid[0]                       = '\0';
         s_mgr.network_password[0]                   = '\0';
@@ -269,7 +269,7 @@ static void on_wifi_event(void* arg, esp_event_base_t event_base, int32_t event_
         break;
     case WIFI_EVENT_STA_CONNECTED: {
         s_mgr.connected = true;
-        s_mgr.ip_lost = false;
+        s_mgr.ip_lost = true;
         if (s_mgr.reconnect_timer) {
             xTimerStop(s_mgr.reconnect_timer, 0);
         }
@@ -300,7 +300,6 @@ static void on_wifi_event(void* arg, esp_event_base_t event_base, int32_t event_
             s_mgr.pending_connect_from_uart_credentials = false;
         }
         
-        wifi_connectivity_start();
         xSemaphoreGiveRecursive(s_mgr.mutex);
         wifi_ctrl_schedule_state_save(); 
         break;
@@ -325,7 +324,7 @@ static void on_wifi_event(void* arg, esp_event_base_t event_base, int32_t event_
         bool was_pending_from_uart = s_mgr.pending_connect_from_uart_credentials;
         
         s_mgr.connected                             = false;
-        s_mgr.ip_lost                               = false;
+        s_mgr.ip_lost                               = true;
         s_mgr.pending_connect_from_uart_credentials = false;
         
         ESP_LOGI(TAG, "Disconnected from AP: %s, reason: %d", target_ssid, event->reason);
@@ -388,12 +387,6 @@ static void on_wifi_event(void* arg, esp_event_base_t event_base, int32_t event_
     }
 }
 
-static void connectivity_check_async(void* arg)
-{
-    wifi_connectivity_check_now();
-    vTaskDelete(NULL);
-}
-
 static void on_ip_event(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
     xSemaphoreTakeRecursive(s_mgr.mutex, portMAX_DELAY);
@@ -406,13 +399,14 @@ static void on_ip_event(void* arg, esp_event_base_t event_base, int32_t event_id
         }
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
         xSemaphoreGiveRecursive(s_mgr.mutex);
-        xTaskCreate(connectivity_check_async, "connectivity_check_async", 4096, NULL, 2, NULL);
+        wifi_connectivity_start();
         break;
     }
     case IP_EVENT_STA_LOST_IP:
         ESP_LOGW(TAG, "Lost IP address");
         s_mgr.ip_lost = true;
         xSemaphoreGiveRecursive(s_mgr.mutex);
+        wifi_connectivity_stop();
         if (s_mgr.reconnect_timer && !s_mgr.reconnect_suppressed) {
             xTimerStart(s_mgr.reconnect_timer, 0);
         }
@@ -617,20 +611,33 @@ static void scanner_task(void* pv)
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         
         bool should_scan = false;
+        uint32_t retry_delay_ms = 0;
         uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
         
         xSemaphoreTakeRecursive(s_mgr.mutex, portMAX_DELAY);
         
         if (s_mgr.interface_started && s_mgr.scan_requested) {
-            if ((current_time - s_mgr.last_scan_time) >= s_mgr.scan_cooldown_ms) {
+            uint32_t elapsed_ms = current_time - s_mgr.last_scan_time;
+            if (elapsed_ms >= s_mgr.scan_cooldown_ms) {
                 should_scan = true;
                 s_mgr.scanning = true;
+            } else {
+                retry_delay_ms = s_mgr.scan_cooldown_ms - elapsed_ms;
             }
         }
         
         xSemaphoreGiveRecursive(s_mgr.mutex);
 
         if (!should_scan) {
+            if (retry_delay_ms > 0) {
+                vTaskDelay(pdMS_TO_TICKS(retry_delay_ms));
+                xSemaphoreTakeRecursive(s_mgr.mutex, portMAX_DELAY);
+                bool retry_requested = s_mgr.interface_started && s_mgr.scan_requested;
+                xSemaphoreGiveRecursive(s_mgr.mutex);
+                if (retry_requested) {
+                    xTaskNotifyGive(s_mgr.scan_task_handle);
+                }
+            }
             continue;
         }
 
@@ -808,7 +815,7 @@ void wifi_ctrl_init()
     s_mgr.auto_start_wifi                        = false;
     s_mgr.auto_connect_from_saved                = false;
     s_mgr.reconnect_suppressed                   = false;
-    s_mgr.ip_lost                                = false;
+    s_mgr.ip_lost                                = true;
     s_mgr.initialized                           = true;
     s_mgr.scan_interval_ms                      = 10000;
     s_mgr.scan_cooldown_ms                      = 3000;
@@ -878,6 +885,17 @@ bool wifi_ctrl_is_connected()
         return s_mgr.connected;
     }
     return false;
+}
+
+bool wifi_ctrl_has_ip_address(void)
+{
+    if (! s_mgr.initialized || s_mgr.mutex == NULL) {
+        return false;
+    }
+    xSemaphoreTakeRecursive(s_mgr.mutex, portMAX_DELAY);
+    bool ready = s_mgr.connected && ! s_mgr.ip_lost;
+    xSemaphoreGiveRecursive(s_mgr.mutex);
+    return ready;
 }
 
 static void connect_to_network(const char* ssid, const char* password)

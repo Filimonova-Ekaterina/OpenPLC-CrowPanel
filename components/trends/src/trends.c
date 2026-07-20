@@ -28,6 +28,8 @@ typedef struct
     lv_obj_t* value_label;
     lv_obj_t* analysis_dot;
     lv_obj_t* analysis_label;
+    lv_obj_t* range_min_label;
+    lv_obj_t* range_max_label;
     double samples[TRENDS_POINT_COUNT];
     bool sample_valid[TRENDS_POINT_COUNT];
 } trend_binding_t;
@@ -43,7 +45,7 @@ typedef struct
 
 static void sample_timer_callback(lv_timer_t* timer);
 static void root_deleted_event(lv_event_t* event);
-static bool tag_is_numeric(const data_model_tag_t* tag);
+static bool tag_is_trend_candidate(const data_model_tag_t* tag);
 static bool tag_numeric_value(const data_model_tag_t* tag, double* value_out);
 static void create_heading(lv_obj_t* parent, size_t visible_count, size_t total_count);
 static void create_empty_state(lv_obj_t* parent);
@@ -52,11 +54,14 @@ static void sample_binding(trends_context_t* context, trend_binding_t* binding);
 static void update_chart_points(trend_binding_t* binding, const data_model_tag_t* tag);
 static void update_analysis(trend_binding_t* binding, const data_model_tag_t* tag);
 static void format_current_value(char* destination, size_t destination_size, const data_model_tag_t* tag, double value);
+static void format_axis_value(char* destination, size_t destination_size, double value);
 static void copy_display_unit(char* destination, size_t destination_size, const char* source);
 
-static bool tag_is_numeric(const data_model_tag_t* tag)
+/** Trends omit accumulating counters; other UI modules still display them normally. */
+static bool tag_is_trend_candidate(const data_model_tag_t* tag)
 {
-    return tag != NULL && tag->readable &&
+    return tag != NULL && tag->readable && strcmp(tag->semantic_role, "runtime") != 0 &&
+           strcmp(tag->semantic_role, "operating_hours") != 0 &&
            (tag->data_type == DATA_MODEL_TYPE_INTEGER || tag->data_type == DATA_MODEL_TYPE_FLOAT ||
             tag->data_type == DATA_MODEL_TYPE_DOUBLE);
 }
@@ -96,10 +101,10 @@ static void create_heading(lv_obj_t* parent, size_t visible_count, size_t total_
 
     char detail_text[64];
     if (visible_count < total_count) {
-        snprintf(detail_text, sizeof(detail_text), "%u of %u signals  |  live", (unsigned)visible_count,
+        snprintf(detail_text, sizeof(detail_text), "%u of %u signals  |  60 s window", (unsigned)visible_count,
                  (unsigned)total_count);
     } else {
-        snprintf(detail_text, sizeof(detail_text), "%u signals  |  live", (unsigned)total_count);
+        snprintf(detail_text, sizeof(detail_text), "%u signals  |  60 s window", (unsigned)total_count);
     }
     lv_obj_t* detail = lv_label_create(heading);
     lv_label_set_text(detail, detail_text);
@@ -142,7 +147,7 @@ static void create_chart_card(trends_context_t* context, const data_model_tag_t*
     binding->tag_index       = tag->index;
 
     lv_obj_t* card = lv_obj_create(context->root);
-    lv_obj_set_size(card, 468, 240);
+    lv_obj_set_size(card, 468, 270);
     style_card(card);
     lv_obj_set_style_pad_all(card, 16, LV_PART_MAIN);
 
@@ -154,9 +159,9 @@ static void create_chart_card(trends_context_t* context, const data_model_tag_t*
     lv_obj_t* equipment_label = lv_label_create(card);
     lv_label_set_text(equipment_label, equipment_name);
     lv_label_set_long_mode(equipment_label, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(equipment_label, 270);
+    lv_obj_set_width(equipment_label, 290);
     lv_obj_set_style_text_color(equipment_label, lv_color_hex(TRENDS_COLOR_ACCENT), LV_PART_MAIN);
-    lv_obj_set_style_text_font(equipment_label, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(equipment_label, &lv_font_montserrat_16, LV_PART_MAIN);
     lv_obj_align(equipment_label, LV_ALIGN_TOP_LEFT, 0, 0);
 
     const char* tag_name = tag->display_name[0] != '\0' ? tag->display_name : tag->browse_name;
@@ -170,11 +175,19 @@ static void create_chart_card(trends_context_t* context, const data_model_tag_t*
 
     binding->value_label = lv_label_create(card);
     lv_label_set_text(binding->value_label, "No value");
-    lv_obj_set_width(binding->value_label, 160);
+    lv_obj_set_width(binding->value_label, 180);
     lv_obj_set_style_text_align(binding->value_label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
     lv_obj_set_style_text_color(binding->value_label, lv_color_hex(TRENDS_COLOR_ACCENT_SOFT), LV_PART_MAIN);
     lv_obj_set_style_text_font(binding->value_label, &lv_font_montserrat_24, LV_PART_MAIN);
     lv_obj_align(binding->value_label, LV_ALIGN_TOP_RIGHT, 0, 20);
+
+    lv_obj_t* current_caption = lv_label_create(card);
+    lv_label_set_text(current_caption, "NOW");
+    lv_obj_set_width(current_caption, 180);
+    lv_obj_set_style_text_align(current_caption, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(current_caption, lv_color_hex(TRENDS_COLOR_TEXT_SECONDARY), LV_PART_MAIN);
+    lv_obj_set_style_text_font(current_caption, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_align(current_caption, LV_ALIGN_TOP_RIGHT, 0, 1);
 
     binding->analysis_dot = lv_obj_create(card);
     lv_obj_remove_style_all(binding->analysis_dot);
@@ -182,17 +195,17 @@ static void create_chart_card(trends_context_t* context, const data_model_tag_t*
     lv_obj_set_style_radius(binding->analysis_dot, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     lv_obj_set_style_bg_color(binding->analysis_dot, lv_color_hex(TRENDS_COLOR_ACCENT), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(binding->analysis_dot, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_align(binding->analysis_dot, LV_ALIGN_TOP_LEFT, 0, 55);
+    lv_obj_align(binding->analysis_dot, LV_ALIGN_TOP_LEFT, 0, 59);
 
     binding->analysis_label = lv_label_create(card);
     lv_label_set_text(binding->analysis_label, "Live window  |  collecting history");
     lv_obj_set_style_text_color(binding->analysis_label, lv_color_hex(TRENDS_COLOR_TEXT_SECONDARY), LV_PART_MAIN);
     lv_obj_set_style_text_font(binding->analysis_label, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_align(binding->analysis_label, LV_ALIGN_TOP_LEFT, 17, 50);
+    lv_obj_align(binding->analysis_label, LV_ALIGN_TOP_LEFT, 17, 54);
 
     binding->chart = lv_chart_create(card);
-    lv_obj_set_size(binding->chart, lv_pct(100), 146);
-    lv_obj_align(binding->chart, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_size(binding->chart, 384, 142);
+    lv_obj_align(binding->chart, LV_ALIGN_BOTTOM_RIGHT, 0, -17);
     lv_chart_set_type(binding->chart, LV_CHART_TYPE_LINE);
     lv_chart_set_point_count(binding->chart, TRENDS_POINT_COUNT);
     lv_chart_set_range(binding->chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
@@ -207,6 +220,34 @@ static void create_chart_card(trends_context_t* context, const data_model_tag_t*
     lv_obj_set_style_size(binding->chart, 0, LV_PART_INDICATOR);
     binding->series = lv_chart_add_series(binding->chart, lv_color_hex(TRENDS_COLOR_ACCENT), LV_CHART_AXIS_PRIMARY_Y);
     lv_chart_set_all_value(binding->chart, binding->series, LV_CHART_POINT_NONE);
+
+    binding->range_max_label = lv_label_create(card);
+    lv_label_set_text(binding->range_max_label, "--");
+    lv_obj_set_width(binding->range_max_label, 46);
+    lv_obj_set_style_text_align(binding->range_max_label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(binding->range_max_label, lv_color_hex(TRENDS_COLOR_TEXT_SECONDARY), LV_PART_MAIN);
+    lv_obj_set_style_text_font(binding->range_max_label, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_align(binding->range_max_label, LV_ALIGN_BOTTOM_LEFT, 0, -145);
+
+    binding->range_min_label = lv_label_create(card);
+    lv_label_set_text(binding->range_min_label, "--");
+    lv_obj_set_width(binding->range_min_label, 46);
+    lv_obj_set_style_text_align(binding->range_min_label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(binding->range_min_label, lv_color_hex(TRENDS_COLOR_TEXT_SECONDARY), LV_PART_MAIN);
+    lv_obj_set_style_text_font(binding->range_min_label, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_align(binding->range_min_label, LV_ALIGN_BOTTOM_LEFT, 0, -25);
+
+    lv_obj_t* window_start = lv_label_create(card);
+    lv_label_set_text(window_start, "60 s ago");
+    lv_obj_set_style_text_color(window_start, lv_color_hex(TRENDS_COLOR_TEXT_SECONDARY), LV_PART_MAIN);
+    lv_obj_set_style_text_font(window_start, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_align(window_start, LV_ALIGN_BOTTOM_LEFT, 50, 1);
+
+    lv_obj_t* window_end = lv_label_create(card);
+    lv_label_set_text(window_end, "now");
+    lv_obj_set_style_text_color(window_end, lv_color_hex(TRENDS_COLOR_TEXT_SECONDARY), LV_PART_MAIN);
+    lv_obj_set_style_text_font(window_end, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_align(window_end, LV_ALIGN_BOTTOM_RIGHT, 0, 1);
 }
 
 lv_obj_t* trends_create(lv_obj_t* parent, data_model_t* data_model)
@@ -237,7 +278,7 @@ lv_obj_t* trends_create(lv_obj_t* parent, data_model_t* data_model)
     size_t tag_count     = data_model_tag_count(data_model);
     for (size_t tag_index = 0; tag_index < tag_count; ++tag_index) {
         data_model_tag_t tag;
-        if (! data_model_get_tag(data_model, tag_index, &tag) || ! tag_is_numeric(&tag)) {
+        if (! data_model_get_tag(data_model, tag_index, &tag) || ! tag_is_trend_candidate(&tag)) {
             continue;
         }
         numeric_count++;
@@ -280,7 +321,7 @@ static void root_deleted_event(lv_event_t* event)
 
 static bool tag_numeric_value(const data_model_tag_t* tag, double* value_out)
 {
-    if (tag == NULL || value_out == NULL || ! tag->value_valid || ! tag_is_numeric(tag)) {
+    if (tag == NULL || value_out == NULL || ! tag->value_valid || ! tag_is_trend_candidate(tag)) {
         return false;
     }
     double value =
@@ -345,6 +386,8 @@ static void update_chart_points(trend_binding_t* binding, const data_model_tag_t
     }
     if (! range_valid) {
         lv_chart_set_all_value(binding->chart, binding->series, LV_CHART_POINT_NONE);
+        lv_label_set_text(binding->range_min_label, "--");
+        lv_label_set_text(binding->range_max_label, "--");
         return;
     }
     if (maximum <= minimum) {
@@ -357,6 +400,11 @@ static void update_chart_points(trend_binding_t* binding, const data_model_tag_t
         maximum += padding;
     }
     double span = maximum - minimum;
+    char axis_value[24];
+    format_axis_value(axis_value, sizeof(axis_value), maximum);
+    lv_label_set_text(binding->range_max_label, axis_value);
+    format_axis_value(axis_value, sizeof(axis_value), minimum);
+    lv_label_set_text(binding->range_min_label, axis_value);
     for (size_t index = 0; index < TRENDS_POINT_COUNT; ++index) {
         lv_coord_t chart_value = LV_CHART_POINT_NONE;
         if (binding->sample_valid[index]) {
@@ -446,6 +494,17 @@ static void format_current_value(char* destination, size_t destination_size, con
         snprintf(destination, destination_size, "%.1f%s%.20s", value, separator, unit);
     } else {
         snprintf(destination, destination_size, "%.2f%s%.20s", value, separator, unit);
+    }
+}
+
+static void format_axis_value(char* destination, size_t destination_size, double value)
+{
+    if (fabs(value) >= 1000.0) {
+        snprintf(destination, destination_size, "%.0f", value);
+    } else if (fabs(value) >= 100.0) {
+        snprintf(destination, destination_size, "%.1f", value);
+    } else {
+        snprintf(destination, destination_size, "%.2f", value);
     }
 }
 

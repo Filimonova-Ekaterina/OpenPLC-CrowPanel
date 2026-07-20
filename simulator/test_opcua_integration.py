@@ -43,6 +43,12 @@ class OpcUaIntegrationTests(unittest.IsolatedAsyncioTestCase):
         server_nodes = self.opcua_server.compressor_nodes[compressor.identifier]
 
         async with Client(url=self.endpoint_url) as client:
+            compressor_object = client.get_node(server_nodes.object_node.nodeid)
+            entity_kind_node = await compressor_object.get_child(
+                [f"{self.opcua_server.namespace_index}:EntityKind"]
+            )
+            self.assertEqual("ActiveEquipment", await entity_kind_node.read_value())
+
             temperature_node = client.get_node(server_nodes.temperature.nodeid)
             run_command_node = client.get_node(server_nodes.run_command.nodeid)
             automatic_mode_node = client.get_node(server_nodes.automatic_mode.nodeid)
